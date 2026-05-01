@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: dmipy-design
+Version: 0.1.0.dev0
+Summary: Optimal acquisition design for diffusion MRI via JAX autodiff CRLB and B-tensor encoding
+Requires-Python: >=3.10
+License-File: LICENSE
+Requires-Dist: numpy>=1.24
+Requires-Dist: jax>=0.4.20
+Requires-Dist: jaxlib>=0.4.20
+Requires-Dist: jaxopt>=0.8
+Requires-Dist: optax>=0.1.7
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: matplotlib; extra == "dev"
+Dynamic: license-file

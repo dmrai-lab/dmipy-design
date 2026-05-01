@@ -38,7 +38,7 @@ class Protocol:
         scheme : PGSEAcquisitionScheme
             Ready to pass to ``MultiCompartmentModel.fit(scheme, data)``.
         """
-        from dmipy.core.acquisition_scheme import acquisition_scheme_from_bvalues
+        from dmipy_fit.core.acquisition_scheme import acquisition_scheme_from_bvalues
         return acquisition_scheme_from_bvalues(
             self.bvalues,
             self.bvecs,

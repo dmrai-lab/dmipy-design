@@ -32,7 +32,7 @@ jax.config.update("jax_enable_x64", True)
 # API: forward_fn(theta, scheme) -> jnp.ndarray shape (N,).
 #
 # dmipy-core JAX API used:
-#   from dmipy.jax.signal_models_jax import g1ball_signal
+#   from dmipy_fit.jax.signal_models_jax import g1ball_signal
 #   g1ball_signal(bvalues: jnp.ndarray, lambda_iso: scalar) -> jnp.ndarray
 
 
@@ -42,7 +42,7 @@ def _ball_forward_fn(theta, scheme):
     theta : jnp.ndarray, shape (1,)   [lambda_iso in SI units, m^2/s]
     scheme : JaxScheme  (bvalues is the only field used by Ball)
     """
-    from dmipy.jax.signal_models_jax import g1ball_signal
+    from dmipy_fit.jax.signal_models_jax import g1ball_signal
     return g1ball_signal(scheme.bvalues, theta[0])
 
 
@@ -53,7 +53,7 @@ def _ball_forward_normalized(theta, scheme):
     Actual lambda_iso = theta[0] * 1e-9 m^2/s.
     """
     _LAMBDA_SCALE = jnp.float64(1e-9)
-    from dmipy.jax.signal_models_jax import g1ball_signal
+    from dmipy_fit.jax.signal_models_jax import g1ball_signal
     return g1ball_signal(scheme.bvalues, theta[0] * _LAMBDA_SCALE)
 
 

@@ -21,7 +21,7 @@ def test_multishell_oed_decreases_d_optimal():
     LAMBDA_SCALE = 3e-9
 
     def forward_fn(theta, scheme):
-        from dmipy.jax.signal_models_jax import g1ball_signal
+        from dmipy_fit.jax.signal_models_jax import g1ball_signal
         return g1ball_signal(scheme.bvalues, theta[0] * LAMBDA_SCALE)
 
     prior_samples = jnp.array(np.full((10, 1), 0.7))

@@ -74,9 +74,13 @@ BVECS_30 = _get_isotropic_dirs(N_DIRS)
 # ---------------------------------------------------------------------------
 # Atom parameter bounds (physical units)
 # ---------------------------------------------------------------------------
-PGSE_B_RANGE          = (50e6,   10000e6)   # s/m²
-PGSE_DELTA_RANGE      = (0.005,  0.060)     # s
-PGSE_DELTA_RATIO_RANGE = (1.1,   3.0)       # Delta / delta
+# PGSE parameterized as (G, delta, Delta_ratio) — b is DERIVED.
+# This matches the OGSE (G, f) parameterization and naturally enforces
+# hardware constraints: with G ≤ G_max, b is physically achievable.
+# At G=0.30 T/m, delta=60ms, Delta=180ms: b ≈ 3700 s/mm² (typical max).
+PGSE_G_RANGE           = (0.01,  0.08)    # T/m  (10–80 mT/m, clinical scanner)
+PGSE_DELTA_RANGE       = (0.015, 0.060)   # s    (≥15ms: clinical gradient risetime limit)
+PGSE_DELTA_RATIO_RANGE = (1.1,   3.0)     # Delta / delta
 
 OGSE_F_RANGE = (10.0,  500.0)   # Hz
 OGSE_G_RANGE = (0.02,  0.30)    # T/m (≤ 300 mT/m Connectom limit)
@@ -87,17 +91,26 @@ OGSE_G_RANGE = (0.02,  0.30)    # T/m (≤ 300 mT/m Connectom limit)
 # ---------------------------------------------------------------------------
 
 def decode_pgse(v):
-    """v in [0,1]^3 -> (b, delta, Delta) in physical units.
+    """v in [0,1]^3 -> (b, delta, Delta) with b DERIVED from (G, delta, Delta).
+
+    Parameterization: v = [G_norm, delta_norm, ratio_norm]
+      G     = G_min + v[0] * (G_max - G_min)        (T/m)
+      delta = delta_min + v[1] * (delta_max - delta_min)  (s)
+      Delta = delta * (ratio_min + v[2] * (ratio_max - ratio_min))
+      b     = gamma^2 * G^2 * delta^2 * (Delta - delta/3)  (derived)
+
+    This mirrors the OGSE (G, f) parameterization: b is always physically
+    achievable given the gradient hardware limit G ≤ G_max.
 
     JAX-traceable: v may be a jnp array (traced) or np array (concrete).
-    Returns JAX scalars when v is traced, plain floats when v is concrete numpy.
     """
-    b     = PGSE_B_RANGE[0]     + v[0] * (PGSE_B_RANGE[1]     - PGSE_B_RANGE[0])
+    G     = PGSE_G_RANGE[0]     + v[0] * (PGSE_G_RANGE[1]     - PGSE_G_RANGE[0])
     delta = PGSE_DELTA_RANGE[0] + v[1] * (PGSE_DELTA_RANGE[1] - PGSE_DELTA_RANGE[0])
     ratio = PGSE_DELTA_RATIO_RANGE[0] + v[2] * (
         PGSE_DELTA_RATIO_RANGE[1] - PGSE_DELTA_RATIO_RANGE[0]
     )
     Delta = delta * ratio
+    b     = GAMMA**2 * G**2 * delta**2 * (Delta - delta / 3.0)
     return b, delta, Delta
 
 
@@ -176,7 +189,9 @@ def build_rc_objective(
     else:
         raise ValueError(f"Unknown waveform type: '{wtype}'. Choose 'pgse' or 'ogse'.")
 
-    rc_and_grad = jax.value_and_grad(rc_fn)
+    # jit-compile once per (wtype, scheme-shape, prior-shape).
+    # Subsequent L-BFGS-B steps reuse the compiled GPU kernel.
+    rc_and_grad = jax.jit(jax.value_and_grad(rc_fn))
 
     def neg_rc_and_grad_np(v_np: np.ndarray):
         v = jnp.array(v_np, dtype=jnp.float64)
@@ -252,9 +267,11 @@ def solve_pricing(
 
     if wtype == 'pgse':
         b, delta, Delta = decode_pgse(best_v)
+        G = float(PGSE_G_RANGE[0] + best_v[0] * (PGSE_G_RANGE[1] - PGSE_G_RANGE[0]))
         best_params = {
             'type': 'pgse',
             'b': b,
+            'G': G,
             'delta': delta,
             'Delta': Delta,
         }

@@ -24,7 +24,7 @@ LAMBDA_SCALE = 3e-9  # maps theta[0] ∈ (0, 1] to lambda_iso ∈ (0, 3e-9] m²/
 
 def _ball_forward_fn(theta, scheme):
     """G1Ball: E_k = exp(-b_k * lambda_iso), lambda_iso = theta[0] * LAMBDA_SCALE."""
-    from dmipy.jax.signal_models_jax import g1ball_signal
+    from dmipy_fit.jax.signal_models_jax import g1ball_signal
     return g1ball_signal(scheme.bvalues, theta[0] * LAMBDA_SCALE)
 
 

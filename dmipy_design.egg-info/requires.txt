@@ -1,0 +1,10 @@
+numpy>=1.24
+jax>=0.4.20
+jaxlib>=0.4.20
+jaxopt>=0.8
+optax>=0.1.7
+
+[dev]
+pytest>=7
+pytest-cov
+matplotlib

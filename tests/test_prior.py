@@ -12,8 +12,8 @@ jax.config.update("jax_enable_x64", True)
 
 def test_sample_prior_shape():
     """sample_prior returns (n_samples, n_params) array."""
-    from dmipy.signal_models.gaussian_models import G1Ball
-    from dmipy.core.modeling_framework import MultiCompartmentModel
+    from dmipy_fit.signal_models.gaussian_models import G1Ball
+    from dmipy_fit.core.modeling_framework import MultiCompartmentModel
     from dmipy_design.prior import sample_prior
     model = MultiCompartmentModel([G1Ball()])
     samples = sample_prior(model, n_samples=50, seed=0)
@@ -23,8 +23,8 @@ def test_sample_prior_shape():
 
 def test_sample_prior_within_range():
     """All samples are within parameter ranges (after scale)."""
-    from dmipy.signal_models.gaussian_models import G1Ball
-    from dmipy.core.modeling_framework import MultiCompartmentModel
+    from dmipy_fit.signal_models.gaussian_models import G1Ball
+    from dmipy_fit.core.modeling_framework import MultiCompartmentModel
     from dmipy_design.prior import sample_prior
     model = MultiCompartmentModel([G1Ball()])
     samples = sample_prior(model, n_samples=200, seed=1)

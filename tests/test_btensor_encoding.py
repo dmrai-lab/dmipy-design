@@ -29,7 +29,7 @@ def _ball_forward_fn(theta, scheme):
     theta : jnp.ndarray, shape (1,)   [lambda_iso in SI units, m^2/s]
     scheme : JaxScheme  (bvalues is the only field used by Ball)
     """
-    from dmipy.jax.signal_models_jax import g1ball_signal
+    from dmipy_fit.jax.signal_models_jax import g1ball_signal
     return g1ball_signal(scheme.bvalues, theta[0])
 
 
