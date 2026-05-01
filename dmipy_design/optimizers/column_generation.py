@@ -98,6 +98,7 @@ def column_generation_oed(
     max_iter: int = 15,
     reduced_cost_tol: float = 0.05,
     n_pricing_restarts: int = 8,
+    lbfgs_maxiter: int = 200,
     prune_threshold: float = 1e-3,
     verbose: bool = True,
 ) -> CGResult:
@@ -121,6 +122,10 @@ def column_generation_oed(
         KW gap tolerance (relative to P) for convergence.  Default 0.05 (5%).
     n_pricing_restarts : int
         Random restarts per waveform type in the pricing problem.
+    lbfgs_maxiter : int
+        Maximum LBFGS iterations per restart in solve_pricing.  All restarts ×
+        maxiter are unrolled by JAX; lower this on memory-constrained GPUs.
+        Default 200; use 50–100 when GPU memory is limited.
     prune_threshold : float
         Remove atoms with weight below this threshold after convergence.
     verbose : bool
@@ -175,6 +180,7 @@ def column_generation_oed(
                 wtype,
                 n_restarts=n_pricing_restarts,
                 rng_seed=iteration * 100 + waveform_types.index(wtype),
+                lbfgs_maxiter=lbfgs_maxiter,
             )
             if rc > best_rc:
                 best_rc   = rc

@@ -380,6 +380,144 @@ class TestColumnGenerationBasic:
 # 7. (slow) Ball+C4Cylinder: OGSE atom discovered in 5 iterations
 # ============================================================================
 
+# ============================================================================
+# 8. jaxopt pricing: returns valid rc and expected param keys
+# ============================================================================
+
+class TestJaxoptPricing:
+
+    @pytest.fixture(scope="class")
+    def ball_cyl_prior(self):
+        rng = np.random.default_rng(7)
+        M = 16
+        vf_ball    = rng.uniform(0.3, 0.7, M)
+        lambda_iso = rng.uniform(1e-9, 3e-9, M)
+        lambda_par = rng.uniform(1.5e-9, 2.5e-9, M)
+        diameter   = rng.uniform(2e-6, 20e-6, M)
+        return jnp.array(
+            np.column_stack([vf_ball, lambda_iso, lambda_par, diameter]),
+            dtype=jnp.float64
+        )
+
+    def test_jaxopt_pricing_returns_valid_rc(self, ball_cyl_prior):
+        """solve_pricing (jaxopt backend) returns best_rc > 0 and expected param keys."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward
+        from dmipy_design.optimizers.pricing_problem import solve_pricing, BVECS_30
+
+        P = ball_cyl_prior.shape[1]
+        F_id = np.eye(P, dtype=np.float64)
+
+        best_rc, best_params, best_scheme = solve_pricing(
+            forward_fn     = ball_c4cylinder_forward,
+            prior_samples  = ball_cyl_prior,
+            sigma          = 0.05,
+            F_total_inv_np = F_id,
+            wtype          = 'pgse',
+            n_restarts     = 4,
+            rng_seed       = 42,
+        )
+
+        assert best_rc > 0, f"Expected best_rc > 0, got {best_rc}"
+        for key in ('type', 'b', 'G', 'delta', 'Delta'):
+            assert key in best_params, f"Missing key '{key}' in best_params: {best_params}"
+
+    def test_jaxopt_pricing_ogse_returns_valid_rc(self, ball_cyl_prior):
+        """solve_pricing with wtype='ogse' returns best_rc > 0 and expected param keys."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward
+        from dmipy_design.optimizers.pricing_problem import solve_pricing
+
+        P = ball_cyl_prior.shape[1]
+        F_id = np.eye(P, dtype=np.float64)
+
+        best_rc, best_params, best_scheme = solve_pricing(
+            forward_fn     = ball_c4cylinder_forward,
+            prior_samples  = ball_cyl_prior,
+            sigma          = 0.05,
+            F_total_inv_np = F_id,
+            wtype          = 'ogse',
+            n_restarts     = 4,
+            rng_seed       = 42,
+        )
+
+        assert best_rc > 0, f"Expected best_rc > 0, got {best_rc}"
+        for key in ('type', 'f', 'G', 'b'):
+            assert key in best_params, f"Missing key '{key}' in best_params: {best_params}"
+
+
+# ============================================================================
+# 9. Sigmoid / logit roundtrip
+# ============================================================================
+
+class TestSigmoidLogit:
+
+    def test_sigmoid_logit_roundtrip(self):
+        """v -> logit(v) -> sigmoid(logit(v)) roundtrips to 1e-6 tolerance."""
+        from dmipy_design.optimizers.pricing_problem import _sigmoid, _logit
+
+        rng = np.random.default_rng(0)
+        v = jnp.array(rng.uniform(0.05, 0.95, size=(20,)), dtype=jnp.float64)
+        v_roundtrip = _sigmoid(_logit(v))
+        np.testing.assert_allclose(
+            np.array(v_roundtrip), np.array(v), atol=1e-6,
+            err_msg="sigmoid(logit(v)) != v"
+        )
+
+    def test_logit_sigmoid_roundtrip(self):
+        """u -> sigmoid(u) -> logit(sigmoid(u)) roundtrips to 1e-6 tolerance."""
+        from dmipy_design.optimizers.pricing_problem import _sigmoid, _logit
+
+        rng = np.random.default_rng(1)
+        u = jnp.array(rng.uniform(-4.0, 4.0, size=(20,)), dtype=jnp.float64)
+        u_roundtrip = _logit(_sigmoid(u))
+        np.testing.assert_allclose(
+            np.array(u_roundtrip), np.array(u), atol=1e-6,
+            err_msg="logit(sigmoid(u)) != u"
+        )
+
+
+# ============================================================================
+# 10. Gamma prior diameter sanity check
+# ============================================================================
+
+class TestGammaPrior:
+
+    def test_gamma_prior_diameter_range(self):
+        """Gamma(k=2, scale=0.4µm) prior: 95th pct < 4µm, mean > 0.5µm."""
+        from scipy.stats import gamma as gamma_dist
+
+        rng = np.random.default_rng(42)
+        M = 10000
+        d = gamma_dist(a=2.0, scale=0.4e-6).rvs(M, random_state=rng)
+        d = np.clip(d, 0.2e-6, 4.0e-6)
+
+        p95 = np.percentile(d, 95)
+        mean = d.mean()
+
+        assert p95 < 4.0e-6, f"95th percentile {p95*1e6:.2f}µm >= 4µm"
+        assert mean > 0.5e-6, f"Mean diameter {mean*1e6:.2f}µm <= 0.5µm"
+
+    def test_gamma_prior_mode(self):
+        """Gamma(k=2, scale=0.4µm): mode = (k-1)*scale = 0.4µm."""
+        from scipy.stats import gamma as gamma_dist
+
+        # For gamma(a=k, scale=theta): mode = (k-1)*theta when k >= 1
+        # With k=2, theta=0.4e-6: mode = 0.4e-6
+        rng = np.random.default_rng(0)
+        M = 50000
+        d = gamma_dist(a=2.0, scale=0.4e-6).rvs(M, random_state=rng)
+        # Histogram peak should be near 0.4µm
+        counts, edges = np.histogram(d, bins=50)
+        mode_bin_centre = 0.5 * (edges[counts.argmax()] + edges[counts.argmax() + 1])
+        # Allow ±0.2µm tolerance
+        assert abs(mode_bin_centre - 0.4e-6) < 0.2e-6, (
+            f"Histogram mode {mode_bin_centre*1e6:.2f}µm not near expected 0.4µm"
+        )
+
+
+# ============================================================================
+# 11. (slow) Ball+C4Cylinder: OGSE atom discovered in 5 iterations
+# ============================================================================
+
 @pytest.mark.slow
 class TestColumnGenerationOgseDiscovery:
 

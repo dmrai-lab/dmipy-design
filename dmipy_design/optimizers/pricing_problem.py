@@ -25,12 +25,18 @@ OGSE: v in [0,1]^2 -> (f, G), b derived
   b = gamma² G² t_eff³,  t_eff = 1/(4f)
 
 float64 throughout (required for C4 Van Gelderen sums).
+
+Optimizer backend
+-----------------
+solve_pricing uses jaxopt.LBFGS with a sigmoid reparameterization to handle
+box constraints [0,1]^n.  All n_restarts are vmapped and JIT-compiled into a
+single GPU kernel — no sequential Python loop over restarts.
 """
 
 import numpy as np
 import jax
 import jax.numpy as jnp
-import scipy.optimize
+import jaxopt
 
 from ..fim import compute_fim_averaged
 from ..jax_scheme_encoder import encode_pgse_shell, encode_ogse_shell
@@ -127,79 +133,23 @@ def decode_ogse(v):
 
 
 # ---------------------------------------------------------------------------
-# Reduced cost (rc) objective builders
+# Sigmoid / logit reparameterization for box constraints
 # ---------------------------------------------------------------------------
 
-def build_rc_objective(
-    forward_fn,
-    prior_samples,
-    sigma: float,
-    F_total_inv_np: np.ndarray,
-    wtype: str,
-    bvecs: np.ndarray = BVECS_30,
-):
-    """Build a numpy-compatible (value, grad) function for the pricing problem.
+def _sigmoid(u):
+    """Sigmoid: maps unbounded u -> (0, 1)."""
+    return 1.0 / (1.0 + jnp.exp(-u))
 
-    The returned function maps v_norm (in [0,1]^n_p) to (-rc, -grad_v_norm),
-    suitable for scipy L-BFGS-B minimisation.
 
-    Parameters
-    ----------
-    forward_fn : callable (theta, JaxScheme) -> jnp.ndarray
-        JAX-differentiable forward model.
-    prior_samples : jnp.ndarray, shape (M, P)
-        Prior parameter samples (float64).
-    sigma : float
-        Noise standard deviation.
-    F_total_inv_np : np.ndarray, shape (P, P)
-        Inverse of current total FIM (numpy, float64).
-    wtype : str
-        'pgse' or 'ogse'.
-    bvecs : np.ndarray, shape (n_dirs, 3)
-        Fixed gradient directions for the candidate shell.
+def _logit(v):
+    """Logit: maps v in (0, 1) -> unbounded space (safe, clips away from 0/1)."""
+    v = jnp.clip(v, 1e-6, 1.0 - 1e-6)
+    return jnp.log(v / (1.0 - v))
 
-    Returns
-    -------
-    neg_rc_and_grad_np : callable(v_np) -> (float, np.ndarray)
-    n_params_atom : int
-        Dimensionality of the normalised parameter vector.
-    """
-    F_inv = jnp.array(F_total_inv_np, dtype=jnp.float64)
-    n_dirs = len(bvecs)
-    bvecs_jax = jnp.array(bvecs, dtype=jnp.float64)
 
-    if wtype == 'pgse':
-        n_params_atom = 3
-
-        def rc_fn(v):
-            b, delta, Delta = decode_pgse(v)
-            scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax)
-            F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
-            return jnp.trace(F_inv @ F_new)
-
-    elif wtype == 'ogse':
-        n_params_atom = 2
-
-        def rc_fn(v):
-            f, G, _b = decode_ogse(v)
-            scheme = encode_ogse_shell(f, G, bvecs_jax)
-            F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
-            return jnp.trace(F_inv @ F_new)
-
-    else:
-        raise ValueError(f"Unknown waveform type: '{wtype}'. Choose 'pgse' or 'ogse'.")
-
-    # jit-compile once per (wtype, scheme-shape, prior-shape).
-    # Subsequent L-BFGS-B steps reuse the compiled GPU kernel.
-    rc_and_grad = jax.jit(jax.value_and_grad(rc_fn))
-
-    def neg_rc_and_grad_np(v_np: np.ndarray):
-        v = jnp.array(v_np, dtype=jnp.float64)
-        val, grad = rc_and_grad(v)
-        return -float(val), -np.array(grad, dtype=np.float64)
-
-    return neg_rc_and_grad_np, n_params_atom
-
+# ---------------------------------------------------------------------------
+# Pricing problem solver (jaxopt LBFGS + vmap over restarts)
+# ---------------------------------------------------------------------------
 
 def solve_pricing(
     forward_fn,
@@ -210,11 +160,13 @@ def solve_pricing(
     n_restarts: int = 8,
     rng_seed: int = 0,
     bvecs: np.ndarray = BVECS_30,
+    lbfgs_maxiter: int = 200,
 ):
-    """Solve the pricing problem for a given waveform type.
+    """Solve the pricing problem using jaxopt LBFGS vmapped over restarts.
 
-    Finds the shell parameters (in normalised [0,1]^n_p space) that maximise
-    the reduced cost rc(u) = trace(F_total^{-1} F_new(u)) / n_dirs.
+    All n_restarts run in parallel on GPU as a single JIT-compiled kernel.
+    Box constraints [0,1]^n are handled via sigmoid reparameterization:
+    optimize in unbounded space u ∈ R^n, with v = sigmoid(u) ∈ (0, 1)^n.
 
     Parameters
     ----------
@@ -224,10 +176,14 @@ def solve_pricing(
     F_total_inv_np : np.ndarray, shape (P, P)
     wtype : str   'pgse' or 'ogse'
     n_restarts : int
-        Number of random restarts for L-BFGS-B.
+        Number of random restarts; all run in parallel via jax.vmap.
     rng_seed : int
         Random seed for reproducibility.
     bvecs : np.ndarray, shape (n_dirs, 3)
+    lbfgs_maxiter : int
+        Maximum LBFGS iterations per restart.  All restarts × maxiter are
+        unrolled by JAX, so lowering this reduces peak GPU memory.
+        Default 200 (good quality); use 50–100 on memory-constrained GPUs.
 
     Returns
     -------
@@ -238,56 +194,84 @@ def solve_pricing(
     best_scheme : JaxScheme
         The shell JaxScheme for the best atom.
     """
+    F_inv = jnp.array(F_total_inv_np, dtype=jnp.float64)
+    bvecs_jax = jnp.array(bvecs, dtype=jnp.float64)
     rng = np.random.default_rng(rng_seed)
-    neg_rc_and_grad, n_p = build_rc_objective(
-        forward_fn, prior_samples, sigma, F_total_inv_np, wtype, bvecs
+
+    # Build rc_fn in [0,1]^n space for the requested waveform type
+    if wtype == 'pgse':
+        n_p = 3
+
+        def rc_fn(v):
+            b, delta, Delta = decode_pgse(v)
+            scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax)
+            F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
+            return jnp.trace(F_inv @ F_new)
+
+    elif wtype == 'ogse':
+        n_p = 2
+
+        def rc_fn(v):
+            f, G, _b = decode_ogse(v)
+            scheme = encode_ogse_shell(f, G, bvecs_jax)
+            F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
+            return jnp.trace(F_inv @ F_new)
+
+    else:
+        raise ValueError(f"Unknown waveform type: '{wtype}'")
+
+    # Sigmoid reparameterization: optimize over unbounded u; v = sigmoid(u)
+    def neg_rc_transformed(u):
+        v = _sigmoid(u)
+        return -rc_fn(v)
+
+    # jaxopt LBFGS over transformed (unbounded) space
+    lbfgs = jaxopt.LBFGS(fun=neg_rc_transformed, maxiter=lbfgs_maxiter, tol=1e-6)
+
+    # Sample initial points in [0.05, 0.95]^n, transform to unbounded space
+    v0_batch = jnp.array(
+        rng.uniform(0.05, 0.95, size=(n_restarts, n_p)), dtype=jnp.float64
     )
-    bounds = [(0.0, 1.0)] * n_p
+    u0_batch = _logit(v0_batch)
 
-    best_rc = -np.inf
-    best_v  = None
+    # vmap over restarts — all run in parallel as one JIT kernel
+    def run_one(u0):
+        result = lbfgs.run(u0)
+        v_opt = _sigmoid(result.params)
+        rc_val = rc_fn(v_opt)
+        return v_opt, rc_val
 
-    for _ in range(n_restarts):
-        v0 = rng.uniform(0.0, 1.0, size=n_p)
-        result = scipy.optimize.minimize(
-            neg_rc_and_grad,
-            v0,
-            method='L-BFGS-B',
-            jac=True,
-            bounds=bounds,
-            options={'maxiter': 200, 'ftol': 1e-10, 'gtol': 1e-6},
-        )
-        rc = -result.fun
-        if rc > best_rc:
-            best_rc = rc
-            best_v  = result.x.copy()
+    run_batch = jax.jit(jax.vmap(run_one))
+    v_opts, rc_vals = run_batch(u0_batch)
+
+    # Pick best restart
+    best_idx = int(jnp.argmax(rc_vals))
+    best_rc  = float(rc_vals[best_idx])
+    best_v   = np.array(v_opts[best_idx])
 
     best_v = np.clip(best_v, 0.0, 1.0)
-    bvecs_jax = jnp.array(bvecs, dtype=jnp.float64)
+    bvecs_jax_np = jnp.array(bvecs, dtype=jnp.float64)
 
     if wtype == 'pgse':
         b, delta, Delta = decode_pgse(best_v)
         G = float(PGSE_G_RANGE[0] + best_v[0] * (PGSE_G_RANGE[1] - PGSE_G_RANGE[0]))
         best_params = {
             'type': 'pgse',
-            'b': b,
+            'b': float(b),
             'G': G,
-            'delta': delta,
-            'Delta': Delta,
+            'delta': float(delta),
+            'Delta': float(Delta),
         }
-        best_scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax)
+        best_scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax_np)
 
     elif wtype == 'ogse':
         f, G, b = decode_ogse(best_v)
         best_params = {
             'type': 'ogse',
-            'f': f,
-            'G': G,
-            'b': b,
+            'f': float(f),
+            'G': float(G),
+            'b': float(b),
         }
-        best_scheme = encode_ogse_shell(f, G, bvecs_jax)
-
-    else:
-        raise ValueError(f"Unknown waveform type: '{wtype}'")
+        best_scheme = encode_ogse_shell(f, G, bvecs_jax_np)
 
     return best_rc, best_params, best_scheme
