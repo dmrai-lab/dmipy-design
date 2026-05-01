@@ -23,3 +23,6 @@ include = ["dmipy_design*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow-running (deselect with '-m \"not slow\"')",
+]

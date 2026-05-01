@@ -47,17 +47,19 @@ class JaxScheme:
 
     Attributes
     ----------
-    bvalues : jnp.ndarray, shape (N,)       s/m²
-    bvecs   : jnp.ndarray, shape (N, 3)     unit vectors
-    delta   : jnp.ndarray, shape (N,) or scalar    gradient pulse duration (s)
-    Delta   : jnp.ndarray, shape (N,) or scalar    gradient separation (s)
-    TE      : jnp.ndarray, shape (N,) or scalar    echo time (s), optional
+    bvalues           : jnp.ndarray, shape (N,)       s/m²
+    bvecs             : jnp.ndarray, shape (N, 3)     unit vectors
+    delta             : jnp.ndarray, shape (N,) or scalar    gradient pulse duration (s)
+    Delta             : jnp.ndarray, shape (N,) or scalar    gradient separation (s)
+    TE                : jnp.ndarray, shape (N,) or scalar    echo time (s), optional
+    gradient_strengths: jnp.ndarray, shape (N,), optional    gradient amplitude (T/m)
     """
     bvalues: jnp.ndarray
     bvecs: jnp.ndarray
     delta: jnp.ndarray
     Delta: jnp.ndarray
     TE: jnp.ndarray | None = None
+    gradient_strengths: jnp.ndarray | None = None
 
 
 def encode_pgse(
@@ -86,10 +88,14 @@ def encode_pgse(
     This function does NOT verify hardware feasibility; that is enforced
     externally via ``HardwareConstraints``.
     """
+    _GAMMA = 267513000.0  # rad/(s·T)
     b = jnp.broadcast_to(u[0], (bvecs.shape[0],))
     delta = jnp.broadcast_to(u[1], (bvecs.shape[0],))
     Delta = jnp.broadcast_to(u[2], (bvecs.shape[0],))
-    return JaxScheme(bvalues=b, bvecs=bvecs, delta=delta, Delta=Delta)
+    # b = gamma² G² delta² (Delta - delta/3)  →  G = sqrt(b / (gamma² delta² (Delta - delta/3)))
+    gradient_strengths = jnp.sqrt(b / (_GAMMA**2 * delta**2 * (Delta - delta / 3.0)))
+    return JaxScheme(bvalues=b, bvecs=bvecs, delta=delta, Delta=Delta,
+                     gradient_strengths=gradient_strengths)
 
 
 def encode_lte(
@@ -246,16 +252,117 @@ def encode_multishell_pgse(
     scheme : JaxScheme
         Concatenated scheme across all shells.
     """
-    all_b, all_delta, all_Delta, all_bvecs = [], [], [], []
+    _GAMMA = 267513000.0  # rad/(s·T)
+    all_b, all_delta, all_Delta, all_bvecs, all_G = [], [], [], [], []
     for s, bvecs in enumerate(bvecs_per_shell):
         n = bvecs.shape[0]
-        all_b.append(jnp.broadcast_to(b_values[s], (n,)))
-        all_delta.append(jnp.broadcast_to(delta_values[s], (n,)))
-        all_Delta.append(jnp.broadcast_to(Delta_values[s], (n,)))
+        b_s = jnp.broadcast_to(b_values[s], (n,))
+        d_s = jnp.broadcast_to(delta_values[s], (n,))
+        D_s = jnp.broadcast_to(Delta_values[s], (n,))
+        all_b.append(b_s)
+        all_delta.append(d_s)
+        all_Delta.append(D_s)
         all_bvecs.append(bvecs)
+        all_G.append(jnp.sqrt(b_s / (_GAMMA**2 * d_s**2 * (D_s - d_s / 3.0))))
     return JaxScheme(
         bvalues=jnp.concatenate(all_b),
         bvecs=jnp.concatenate(all_bvecs),
         delta=jnp.concatenate(all_delta),
         Delta=jnp.concatenate(all_Delta),
+        gradient_strengths=jnp.concatenate(all_G),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shell-level encoders for column generation OED
+# These accept explicit scalar parameters (not u-vectors) and build a
+# complete n-direction shell as a JaxScheme.
+# ---------------------------------------------------------------------------
+
+_GAMMA = 267513000.0  # rad/(s·T)
+
+
+def encode_pgse_shell(
+    b,
+    delta,
+    Delta,
+    bvecs: jnp.ndarray,
+) -> JaxScheme:
+    """Build a PGSE shell JaxScheme from explicit scalar parameters.
+
+    Parameters may be plain Python floats, numpy scalars, or JAX traced
+    scalars (for use inside jax.grad / jax.value_and_grad).
+
+    Parameters
+    ----------
+    b : scalar (float or JAX scalar)
+        b-value (s/m²).
+    delta : scalar
+        Gradient pulse duration (s).
+    Delta : scalar
+        Gradient separation (s).
+    bvecs : jnp.ndarray, shape (N, 3)
+        Gradient directions for this shell.
+
+    Returns
+    -------
+    JaxScheme with gradient_strengths populated.
+    """
+    n = bvecs.shape[0]
+    b_arr     = jnp.broadcast_to(jnp.asarray(b,     dtype=jnp.float64), (n,))
+    delta_arr = jnp.broadcast_to(jnp.asarray(delta, dtype=jnp.float64), (n,))
+    Delta_arr = jnp.broadcast_to(jnp.asarray(Delta, dtype=jnp.float64), (n,))
+    G_arr = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    return JaxScheme(
+        bvalues=b_arr,
+        bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
+        delta=delta_arr,
+        Delta=Delta_arr,
+        gradient_strengths=G_arr,
+    )
+
+
+def encode_ogse_shell(
+    freq,
+    G,
+    bvecs: jnp.ndarray,
+) -> JaxScheme:
+    """Build an OGSE shell JaxScheme from (f, G) parameterization.
+
+    The b-value is derived:  b = gamma² G² t_eff³,  t_eff = 1 / (4 f).
+    delta = t_eff, Delta = t_eff + t_eff/3 so that Delta - delta/3 = t_eff.
+    gradient_strengths = G (constant across all directions in the shell).
+
+    Parameters may be plain Python floats, numpy scalars, or JAX traced
+    scalars (for use inside jax.grad / jax.value_and_grad).
+
+    Parameters
+    ----------
+    freq : scalar
+        Oscillation frequency (Hz).
+    G : scalar
+        Gradient strength (T/m).
+    bvecs : jnp.ndarray, shape (N, 3)
+        Gradient directions for this shell.
+
+    Returns
+    -------
+    JaxScheme with gradient_strengths = G, delta = t_eff, Delta = t_eff*(4/3).
+    """
+    n = bvecs.shape[0]
+    freq_j = jnp.asarray(freq, dtype=jnp.float64)
+    G_j    = jnp.asarray(G,    dtype=jnp.float64)
+    t_eff  = 1.0 / (4.0 * freq_j)
+    b      = _GAMMA**2 * G_j**2 * t_eff**3
+    b_arr     = jnp.broadcast_to(b,     (n,))
+    t_arr     = jnp.broadcast_to(t_eff, (n,))
+    # Delta - delta/3 = t_eff  =>  Delta = t_eff + t_eff/3 = 4*t_eff/3
+    Delta_arr = jnp.broadcast_to(t_eff + t_eff / 3.0, (n,))
+    G_arr     = jnp.broadcast_to(G_j,   (n,))
+    return JaxScheme(
+        bvalues=b_arr,
+        bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
+        delta=t_arr,
+        Delta=Delta_arr,
+        gradient_strengths=G_arr,
     )
