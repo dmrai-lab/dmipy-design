@@ -36,7 +36,7 @@ import jax.numpy as jnp
 from scipy.stats import gamma as gamma_dist
 
 from dmipy_design.analytical_forward import ball_c4cylinder_forward
-from dmipy_design.optimizers.pricing_problem import encode_pgse_shell, BVECS_30
+from dmipy_design.optimizers.pricing_problem import encode_pgse_shell, BVECS_30, CLINICAL_3T
 from dmipy_design.optimizers.column_generation import column_generation_oed, Atom
 
 # ── Prior ────────────────────────────────────────────────────────────────────
@@ -98,20 +98,21 @@ print(f"  t_eff = Delta - delta/3 = {(0.045 - 0.022/3)*1e3:.1f} ms")
 print("\n" + "=" * 70)
 print("Column Generation OED  —  White Matter Axon Diameter")
 print("Prior: gamma(k=2, scale=0.4µm) diameter, log-uniform diffusivities")
-print("Hardware: clinical 3T scanner (G_max=80 mT/m PGSE)")
+print("Hardware: clinical 3T scanner (G_max=80 mT/m, PGSE+OGSE+STE)")
 print("=" * 70)
 
 result = column_generation_oed(
     forward_fn         = ball_c4cylinder_forward,
     prior_samples      = prior,
     sigma              = 0.05,
-    waveform_types     = ['pgse', 'ogse'],
+    waveform_types     = ['pgse', 'ogse', 'ste'],
     initial_atoms      = [atom0],
     max_iter           = _MAX_ITER,
     reduced_cost_tol   = 0.05,
     n_pricing_restarts = _N_RESTARTS,
     lbfgs_maxiter      = _LBFGS_MAXITER,
     verbose            = True,
+    hardware           = CLINICAL_3T,
 )
 
 # ── Print results ────────────────────────────────────────────────────────────
@@ -128,6 +129,15 @@ for i, (atom, w) in enumerate(zip(result.atoms, result.weights)):
         t  = 1000.0 / (4.0 * f)
         print(f"{i:<5} {'ogse':<8} {w:.4f}   f={f:.1f}Hz  G={G*1e3:.0f}mT/m  "
               f"b={b/1e6:.3f}s/mm²  t_eff={t:.1f}ms")
+    elif atom.type == 'ste':
+        b     = atom.params['b']
+        delta = atom.params['delta']
+        Delta = atom.params['Delta']
+        G     = atom.params.get('G', float('nan'))
+        t     = (Delta - delta / 3.0) * 1000.0
+        print(f"{i:<5} {'ste':<8} {w:.4f}   b={b/1e6:.0f}s/mm²  "
+              f"G={G*1e3:.0f}mT/m  delta={delta*1e3:.1f}ms  Delta={Delta*1e3:.1f}ms  "
+              f"t_eff={t:.1f}ms")
     else:
         b     = atom.params['b']
         delta = atom.params['delta']

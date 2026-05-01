@@ -47,7 +47,7 @@ import numpy as np
 import jax.numpy as jnp
 
 from .master_problem import solve_master
-from .pricing_problem import solve_pricing, N_DIRS
+from .pricing_problem import solve_pricing, N_DIRS, HardwarePreset, CLINICAL_3T
 from ..fim import compute_fim_averaged
 
 EPS_FIM = 1e-10  # regularisation for FIM inversion
@@ -101,6 +101,7 @@ def column_generation_oed(
     lbfgs_maxiter: int = 200,
     prune_threshold: float = 1e-3,
     verbose: bool = True,
+    hardware: HardwarePreset = CLINICAL_3T,
 ) -> CGResult:
     """Column generation OED for dMRI acquisition scheme optimization.
 
@@ -113,7 +114,7 @@ def column_generation_oed(
     sigma : float
         Noise standard deviation.
     waveform_types : list of str
-        Waveform types to consider in pricing, e.g. ['pgse', 'ogse'].
+        Waveform types to consider in pricing, e.g. ['pgse', 'ogse', 'ste'].
     initial_atoms : list of Atom
         Starting atom library.  At least one atom required.
     max_iter : int
@@ -130,6 +131,9 @@ def column_generation_oed(
         Remove atoms with weight below this threshold after convergence.
     verbose : bool
         Print per-iteration progress.
+    hardware : HardwarePreset
+        Scanner hardware limits (g_max applies to both PGSE and OGSE).
+        Default: CLINICAL_3T (80 mT/m).
 
     Returns
     -------
@@ -181,6 +185,7 @@ def column_generation_oed(
                 n_restarts=n_pricing_restarts,
                 rng_seed=iteration * 100 + waveform_types.index(wtype),
                 lbfgs_maxiter=lbfgs_maxiter,
+                hardware=hardware,
             )
             if rc > best_rc:
                 best_rc   = rc

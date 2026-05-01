@@ -51,7 +51,7 @@ print()
 # ---------------------------------------------------------------------------
 # 3. Gradient directions (30-direction isotropic shell)
 # ---------------------------------------------------------------------------
-from dmipy_design.optimizers.pricing_problem import BVECS_30
+from dmipy_design.optimizers.pricing_problem import BVECS_30, CONNECTOM_3T
 bvecs_30 = jnp.array(BVECS_30, dtype=jnp.float64)
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ n_restarts = 5      # pricing restarts per waveform type
 
 print("=" * 70)
 print("Column Generation OED  —  Ball + C4Cylinder (GPA/IMPULSED)")
-print("Waveform types: PGSE + OGSE")
+print("Waveform types: PGSE + OGSE  |  Hardware: Connectom 3T (300 mT/m)")
 print(f"sigma={sigma},  max_iter={max_iter},  n_pricing_restarts={n_restarts}")
 print("=" * 70)
 print()
@@ -104,6 +104,7 @@ result = column_generation_oed(
     reduced_cost_tol=0.05,
     n_pricing_restarts=n_restarts,
     verbose=True,
+    hardware=CONNECTOM_3T,
 )
 
 # ---------------------------------------------------------------------------

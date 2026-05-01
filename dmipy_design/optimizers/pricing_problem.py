@@ -37,12 +37,42 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jaxopt
+from dataclasses import dataclass
 
 from ..fim import compute_fim_averaged
-from ..jax_scheme_encoder import encode_pgse_shell, encode_ogse_shell
+from ..jax_scheme_encoder import encode_pgse_shell, encode_ogse_shell, encode_ste_shell
 
 GAMMA = 267513000.0  # rad/(s·T)
 N_DIRS = 30
+
+
+# ---------------------------------------------------------------------------
+# Scanner hardware presets
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HardwarePreset:
+    """Scanner hardware limits that apply to both PGSE and OGSE.
+
+    Attributes
+    ----------
+    name : str
+        Human-readable scanner name.
+    g_max : float
+        Maximum gradient amplitude (T/m), applied to both PGSE and OGSE.
+    pgse_delta_min : float
+        Minimum PGSE pulse duration (s); enforced by gradient risetime.
+    ogse_f_max : float
+        Maximum OGSE frequency (Hz).
+    """
+    name: str
+    g_max: float
+    pgse_delta_min: float
+    ogse_f_max: float
+
+
+CLINICAL_3T  = HardwarePreset('clinical_3T',  g_max=0.08, pgse_delta_min=0.015, ogse_f_max=300.0)
+CONNECTOM_3T = HardwarePreset('connectom_3T', g_max=0.30, pgse_delta_min=0.005, ogse_f_max=500.0)
 
 # ---------------------------------------------------------------------------
 # Fixed isotropic 30-direction hemisphere
@@ -78,12 +108,10 @@ def _get_isotropic_dirs(n: int = 30) -> np.ndarray:
 BVECS_30 = _get_isotropic_dirs(N_DIRS)
 
 # ---------------------------------------------------------------------------
-# Atom parameter bounds (physical units)
+# Atom parameter bounds (physical units) — legacy module-level constants
 # ---------------------------------------------------------------------------
-# PGSE parameterized as (G, delta, Delta_ratio) — b is DERIVED.
-# This matches the OGSE (G, f) parameterization and naturally enforces
-# hardware constraints: with G ≤ G_max, b is physically achievable.
-# At G=0.30 T/m, delta=60ms, Delta=180ms: b ≈ 3700 s/mm² (typical max).
+# These are kept for backward compatibility but the preferred interface is
+# to pass a HardwarePreset to decode_pgse / decode_ogse.
 PGSE_G_RANGE           = (0.01,  0.08)    # T/m  (10–80 mT/m, clinical scanner)
 PGSE_DELTA_RANGE       = (0.015, 0.060)   # s    (≥15ms: clinical gradient risetime limit)
 PGSE_DELTA_RATIO_RANGE = (1.1,   3.0)     # Delta / delta
@@ -96,40 +124,83 @@ OGSE_G_RANGE = (0.02,  0.30)    # T/m (≤ 300 mT/m Connectom limit)
 # Normalised decode helpers
 # ---------------------------------------------------------------------------
 
-def decode_pgse(v):
+def decode_pgse(v, hardware: HardwarePreset = CLINICAL_3T):
     """v in [0,1]^3 -> (b, delta, Delta) with b DERIVED from (G, delta, Delta).
 
     Parameterization: v = [G_norm, delta_norm, ratio_norm]
-      G     = G_min + v[0] * (G_max - G_min)        (T/m)
-      delta = delta_min + v[1] * (delta_max - delta_min)  (s)
-      Delta = delta * (ratio_min + v[2] * (ratio_max - ratio_min))
+      G     = g_max/10 + v[0] * g_max * 0.9            (T/m)
+      delta = pgse_delta_min + v[1] * (0.060 - pgse_delta_min)  (s)
+      Delta = delta * (1.1 + v[2] * 1.9)               (Delta/delta in [1.1, 3.0])
       b     = gamma^2 * G^2 * delta^2 * (Delta - delta/3)  (derived)
 
-    This mirrors the OGSE (G, f) parameterization: b is always physically
-    achievable given the gradient hardware limit G ≤ G_max.
+    The hardware parameter is a Python object used at trace time (not a traced
+    JAX value) — it acts as a static compile-time constant, making this safe to
+    use inside JAX-traced closures.
+
+    Parameters
+    ----------
+    v : array-like, shape (3,)
+        Normalised parameters in [0, 1].
+    hardware : HardwarePreset
+        Scanner hardware limits.  Default: CLINICAL_3T (80 mT/m).
+
+    Returns
+    -------
+    (b, delta, Delta) as JAX scalars.
 
     JAX-traceable: v may be a jnp array (traced) or np array (concrete).
     """
-    G     = PGSE_G_RANGE[0]     + v[0] * (PGSE_G_RANGE[1]     - PGSE_G_RANGE[0])
-    delta = PGSE_DELTA_RANGE[0] + v[1] * (PGSE_DELTA_RANGE[1] - PGSE_DELTA_RANGE[0])
-    ratio = PGSE_DELTA_RATIO_RANGE[0] + v[2] * (
-        PGSE_DELTA_RATIO_RANGE[1] - PGSE_DELTA_RATIO_RANGE[0]
-    )
+    G     = hardware.g_max * 0.1 + v[0] * hardware.g_max * 0.9
+    delta = hardware.pgse_delta_min + v[1] * (0.060 - hardware.pgse_delta_min)
+    ratio = 1.1 + v[2] * 1.9    # Delta/delta in [1.1, 3.0]
     Delta = delta * ratio
     b     = GAMMA**2 * G**2 * delta**2 * (Delta - delta / 3.0)
     return b, delta, Delta
 
 
-def decode_ogse(v):
+def decode_ogse(v, hardware: HardwarePreset = CLINICAL_3T):
     """v in [0,1]^2 -> (f, G, b) with b derived from physics.
+
+    Parameters
+    ----------
+    v : array-like, shape (2,)
+        Normalised parameters in [0, 1].
+    hardware : HardwarePreset
+        Scanner hardware limits.  Default: CLINICAL_3T (80 mT/m).
+
+    Returns
+    -------
+    (f, G, b) as JAX scalars.
 
     JAX-traceable: v may be a jnp array (traced) or np array (concrete).
     """
-    f = OGSE_F_RANGE[0] + v[0] * (OGSE_F_RANGE[1] - OGSE_F_RANGE[0])
-    G = OGSE_G_RANGE[0] + v[1] * (OGSE_G_RANGE[1] - OGSE_G_RANGE[0])
+    f = 10.0 + v[0] * (hardware.ogse_f_max - 10.0)
+    G = hardware.g_max * 0.1 + v[1] * hardware.g_max * 0.9
     t_eff = 1.0 / (4.0 * f)
     b = GAMMA**2 * G**2 * t_eff**3
     return f, G, b
+
+
+def decode_ste(v, hardware: HardwarePreset = CLINICAL_3T):
+    """v in [0,1]^3 -> (b, delta, Delta) for STE — identical physics to PGSE.
+
+    STE uses the same (G, delta, Delta) parameterization as PGSE; the
+    difference is the encoding type stored in the resulting JaxScheme.
+
+    Parameters
+    ----------
+    v : array-like, shape (3,)
+        Normalised parameters in [0, 1].
+    hardware : HardwarePreset
+        Scanner hardware limits.  Default: CLINICAL_3T (80 mT/m).
+
+    Returns
+    -------
+    (b, delta, Delta) as JAX scalars.
+
+    JAX-traceable: v may be a jnp array (traced) or np array (concrete).
+    """
+    return decode_pgse(v, hardware)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +232,7 @@ def solve_pricing(
     rng_seed: int = 0,
     bvecs: np.ndarray = BVECS_30,
     lbfgs_maxiter: int = 200,
+    hardware: HardwarePreset = CLINICAL_3T,
 ):
     """Solve the pricing problem using jaxopt LBFGS vmapped over restarts.
 
@@ -174,7 +246,7 @@ def solve_pricing(
     prior_samples : jnp.ndarray, shape (M, P)
     sigma : float
     F_total_inv_np : np.ndarray, shape (P, P)
-    wtype : str   'pgse' or 'ogse'
+    wtype : str   'pgse', 'ogse', or 'ste'
     n_restarts : int
         Number of random restarts; all run in parallel via jax.vmap.
     rng_seed : int
@@ -184,6 +256,10 @@ def solve_pricing(
         Maximum LBFGS iterations per restart.  All restarts × maxiter are
         unrolled by JAX, so lowering this reduces peak GPU memory.
         Default 200 (good quality); use 50–100 on memory-constrained GPUs.
+    hardware : HardwarePreset
+        Scanner hardware limits (g_max, delta_min, f_max).  PGSE and OGSE
+        both use ``hardware.g_max``, ensuring hardware-consistent bounds.
+        Default: CLINICAL_3T (80 mT/m).
 
     Returns
     -------
@@ -198,12 +274,15 @@ def solve_pricing(
     bvecs_jax = jnp.array(bvecs, dtype=jnp.float64)
     rng = np.random.default_rng(rng_seed)
 
-    # Build rc_fn in [0,1]^n space for the requested waveform type
+    # Build rc_fn in [0,1]^n space for the requested waveform type.
+    # The hardware object is captured from the enclosing scope — it is a
+    # Python object, not a JAX traced value, so it acts as a static
+    # compile-time constant inside the JAX-traced closures below.
     if wtype == 'pgse':
         n_p = 3
 
         def rc_fn(v):
-            b, delta, Delta = decode_pgse(v)
+            b, delta, Delta = decode_pgse(v, hardware)
             scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax)
             F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
             return jnp.trace(F_inv @ F_new)
@@ -212,8 +291,17 @@ def solve_pricing(
         n_p = 2
 
         def rc_fn(v):
-            f, G, _b = decode_ogse(v)
+            f, G, _b = decode_ogse(v, hardware)
             scheme = encode_ogse_shell(f, G, bvecs_jax)
+            F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
+            return jnp.trace(F_inv @ F_new)
+
+    elif wtype == 'ste':
+        n_p = 3
+
+        def rc_fn(v):
+            b, delta, Delta = decode_ste(v, hardware)
+            scheme = encode_ste_shell(b, delta, Delta, bvecs_jax)
             F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
             return jnp.trace(F_inv @ F_new)
 
@@ -253,8 +341,8 @@ def solve_pricing(
     bvecs_jax_np = jnp.array(bvecs, dtype=jnp.float64)
 
     if wtype == 'pgse':
-        b, delta, Delta = decode_pgse(best_v)
-        G = float(PGSE_G_RANGE[0] + best_v[0] * (PGSE_G_RANGE[1] - PGSE_G_RANGE[0]))
+        b, delta, Delta = decode_pgse(best_v, hardware)
+        G = float(hardware.g_max * 0.1 + best_v[0] * hardware.g_max * 0.9)
         best_params = {
             'type': 'pgse',
             'b': float(b),
@@ -265,7 +353,7 @@ def solve_pricing(
         best_scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax_np)
 
     elif wtype == 'ogse':
-        f, G, b = decode_ogse(best_v)
+        f, G, b = decode_ogse(best_v, hardware)
         best_params = {
             'type': 'ogse',
             'f': float(f),
@@ -273,5 +361,17 @@ def solve_pricing(
             'b': float(b),
         }
         best_scheme = encode_ogse_shell(f, G, bvecs_jax_np)
+
+    elif wtype == 'ste':
+        b, delta, Delta = decode_ste(best_v, hardware)
+        G = float(hardware.g_max * 0.1 + best_v[0] * hardware.g_max * 0.9)
+        best_params = {
+            'type': 'ste',
+            'b': float(b),
+            'G': G,
+            'delta': float(delta),
+            'Delta': float(Delta),
+        }
+        best_scheme = encode_ste_shell(b, delta, Delta, bvecs_jax_np)
 
     return best_rc, best_params, best_scheme

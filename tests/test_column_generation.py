@@ -184,14 +184,18 @@ class TestDecoding:
 class TestOgsePhysics:
 
     def test_decode_ogse_b_formula(self):
-        """At f=100 Hz, G=0.1 T/m: b = gamma² G² t_eff³."""
-        from dmipy_design.optimizers.pricing_problem import decode_ogse
+        """At f=100 Hz, G=0.1 T/m: b = gamma² G² t_eff³ (using CONNECTOM_3T preset)."""
+        from dmipy_design.optimizers.pricing_problem import decode_ogse, CONNECTOM_3T
 
+        # CONNECTOM_3T: ogse_f_max=500 Hz, g_max=0.30 T/m
+        # v[0]: f = 10 + v[0] * (500 - 10) = 100  ->  v[0] = 90/490
+        # v[1]: G = 0.30*0.1 + v[1]*0.30*0.9 = 0.03 + v[1]*0.27 = 0.1 -> v[1] = 0.07/0.27
+        hw = CONNECTOM_3T
         v = np.array([
-            (100.0 - 10.0) / (500.0 - 10.0),   # f -> 100 Hz
-            (0.1  - 0.02)  / (0.30  - 0.02),    # G -> 0.1 T/m
+            (100.0 - 10.0) / (hw.ogse_f_max - 10.0),        # f -> 100 Hz
+            (0.1 - hw.g_max * 0.1) / (hw.g_max * 0.9),      # G -> 0.1 T/m
         ])
-        f, G, b = decode_ogse(v)
+        f, G, b = decode_ogse(v, hardware=hw)
 
         t_eff = 1.0 / (4.0 * f)
         b_expected = GAMMA**2 * G**2 * t_eff**3
@@ -517,6 +521,128 @@ class TestGammaPrior:
 # ============================================================================
 # 11. (slow) Ball+C4Cylinder: OGSE atom discovered in 5 iterations
 # ============================================================================
+
+# ============================================================================
+# 11b. Hardware presets and STE
+# ============================================================================
+
+class TestHardwarePresets:
+
+    def test_hardware_preset_connectom_allows_short_delta(self):
+        """CONNECTOM_3T allows delta < 0.010 s at v[1]=0 (minimum)."""
+        from dmipy_design.optimizers.pricing_problem import decode_pgse, CONNECTOM_3T
+        v = np.array([0.5, 0.0, 0.5])
+        b, delta, Delta = decode_pgse(v, hardware=CONNECTOM_3T)
+        assert float(delta) < 0.010, (
+            f"CONNECTOM delta={float(delta)*1e3:.1f}ms should be < 10ms "
+            f"(pgse_delta_min={CONNECTOM_3T.pgse_delta_min*1e3:.1f}ms)"
+        )
+
+    def test_hardware_preset_clinical_limits_delta(self):
+        """CLINICAL_3T enforces delta >= 0.015 s for all v in [0,1]^3."""
+        from dmipy_design.optimizers.pricing_problem import decode_pgse, CLINICAL_3T
+        rng = np.random.default_rng(5)
+        for _ in range(50):
+            v = rng.uniform(0, 1, size=3)
+            b, delta, Delta = decode_pgse(v, hardware=CLINICAL_3T)
+            assert float(delta) >= 0.015, (
+                f"CLINICAL delta={float(delta)*1e3:.1f}ms < 15ms at v={v}"
+            )
+
+    def test_hardware_preset_connectom_higher_gmax(self):
+        """CONNECTOM_3T allows G up to 300 mT/m (CLINICAL_3T max is 80 mT/m)."""
+        from dmipy_design.optimizers.pricing_problem import decode_pgse, CLINICAL_3T, CONNECTOM_3T
+        v = np.array([1.0, 0.5, 0.5])  # maximum G
+        _, _, _ = decode_pgse(v, hardware=CLINICAL_3T)
+        # CONNECTOM G_max = hardware.g_max (0.30 T/m), CLINICAL G_max = 0.08 T/m
+        assert CONNECTOM_3T.g_max > CLINICAL_3T.g_max, (
+            "CONNECTOM_3T g_max should exceed CLINICAL_3T g_max"
+        )
+
+    def test_decode_ste_same_as_pgse_physics(self):
+        """decode_ste returns identical (b, delta, Delta) to decode_pgse for same v."""
+        from dmipy_design.optimizers.pricing_problem import decode_pgse, decode_ste, CLINICAL_3T
+        rng = np.random.default_rng(7)
+        for _ in range(20):
+            v = rng.uniform(0, 1, size=3)
+            b_pgse, delta_pgse, Delta_pgse = decode_pgse(v, hardware=CLINICAL_3T)
+            b_ste,  delta_ste,  Delta_ste  = decode_ste(v,  hardware=CLINICAL_3T)
+            assert abs(float(b_pgse) - float(b_ste)) < 1e-10, "b mismatch"
+            assert abs(float(delta_pgse) - float(delta_ste)) < 1e-12, "delta mismatch"
+            assert abs(float(Delta_pgse) - float(Delta_ste)) < 1e-12, "Delta mismatch"
+
+    def test_encode_ste_shell_encoding_type(self, bvecs_30):
+        """encode_ste_shell produces a JaxScheme with encoding_type='ste'."""
+        from dmipy_design.jax_scheme_encoder import encode_ste_shell
+        scheme = encode_ste_shell(1000e6, 0.020, 0.040, bvecs_30)
+        assert scheme.encoding_type == 'ste', (
+            f"Expected encoding_type='ste', got '{scheme.encoding_type}'"
+        )
+
+    def test_encode_pgse_shell_encoding_type_default(self, bvecs_30):
+        """encode_pgse_shell produces a JaxScheme with encoding_type='pgse' (default)."""
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+        scheme = encode_pgse_shell(1000e6, 0.020, 0.040, bvecs_30)
+        assert scheme.encoding_type == 'pgse', (
+            f"Expected encoding_type='pgse', got '{scheme.encoding_type}'"
+        )
+
+    def test_ball_c4cylinder_forward_ste_direction_independent(self, bvecs_30):
+        """STE forward: all 30 directions produce the same signal (within tolerance)."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward
+        from dmipy_design.jax_scheme_encoder import encode_ste_shell
+
+        scheme = encode_ste_shell(1000e6, 0.020, 0.040, bvecs_30)
+        theta = jnp.array([0.5, 2e-9, 2e-9, 10e-6], dtype=jnp.float64)
+        sig = ball_c4cylinder_forward(theta, scheme)
+
+        # All 30 directions should give the same signal (STE is rotationally invariant)
+        assert sig.shape == (30,), f"Expected shape (30,), got {sig.shape}"
+        np.testing.assert_allclose(
+            np.array(sig), float(sig[0]), rtol=1e-8, atol=1e-10,
+            err_msg="STE signal is not direction-independent"
+        )
+
+    def test_pricing_ste_returns_valid_rc(self, bvecs_30):
+        """solve_pricing with wtype='ste' returns best_rc > 0 and expected param keys."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward
+        from dmipy_design.optimizers.pricing_problem import solve_pricing, CLINICAL_3T
+
+        rng = np.random.default_rng(42)
+        M = 16
+        vf_ball    = rng.uniform(0.3, 0.7, M)
+        lambda_iso = rng.uniform(1e-9, 3e-9, M)
+        lambda_par = rng.uniform(1.5e-9, 2.5e-9, M)
+        diameter   = rng.uniform(2e-6, 20e-6, M)
+        prior = jnp.array(
+            np.column_stack([vf_ball, lambda_iso, lambda_par, diameter]),
+            dtype=jnp.float64
+        )
+
+        P = prior.shape[1]
+        F_id = np.eye(P, dtype=np.float64)
+
+        best_rc, best_params, best_scheme = solve_pricing(
+            forward_fn     = ball_c4cylinder_forward,
+            prior_samples  = prior,
+            sigma          = 0.05,
+            F_total_inv_np = F_id,
+            wtype          = 'ste',
+            n_restarts     = 3,
+            rng_seed       = 42,
+            hardware       = CLINICAL_3T,
+        )
+
+        assert best_rc > 0, f"Expected best_rc > 0, got {best_rc}"
+        for key in ('type', 'b', 'G', 'delta', 'Delta'):
+            assert key in best_params, f"Missing key '{key}' in best_params: {best_params}"
+        assert best_params['type'] == 'ste', (
+            f"Expected type='ste', got '{best_params['type']}'"
+        )
+        assert best_scheme.encoding_type == 'ste', (
+            f"Expected encoding_type='ste', got '{best_scheme.encoding_type}'"
+        )
+
 
 @pytest.mark.slow
 class TestColumnGenerationOgseDiscovery:

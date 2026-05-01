@@ -60,6 +60,7 @@ class JaxScheme:
     Delta: jnp.ndarray
     TE: jnp.ndarray | None = None
     gradient_strengths: jnp.ndarray | None = None
+    encoding_type: str = 'pgse'
 
 
 def encode_pgse(
@@ -365,4 +366,51 @@ def encode_ogse_shell(
         delta=t_arr,
         Delta=Delta_arr,
         gradient_strengths=G_arr,
+    )
+
+
+def encode_ste_shell(
+    b,
+    delta,
+    Delta,
+    bvecs: jnp.ndarray,
+) -> JaxScheme:
+    """Build a JaxScheme for an STE (spherical tensor encoding) shell.
+
+    STE uses three sequential bipolar gradient pairs (one per Cartesian axis)
+    so the off-diagonal B-tensor elements cancel and B = (b/3) I.
+    The signal is direction-independent; bvecs are stored for API consistency
+    but all directions produce the same attenuation.
+
+    Parameters may be plain Python floats, numpy scalars, or JAX traced
+    scalars (for use inside jax.grad / jax.value_and_grad).
+
+    Parameters
+    ----------
+    b : scalar (float or JAX scalar)
+        b-value (s/m²).
+    delta : scalar
+        Gradient pulse duration (s).
+    Delta : scalar
+        Gradient separation (s).
+    bvecs : jnp.ndarray, shape (N, 3)
+        Gradient directions for this shell (stored for shape; STE is
+        rotationally invariant so directions do not affect the signal).
+
+    Returns
+    -------
+    JaxScheme with encoding_type='ste' and gradient_strengths populated.
+    """
+    n = bvecs.shape[0]
+    b_arr     = jnp.broadcast_to(jnp.asarray(b,     dtype=jnp.float64), (n,))
+    delta_arr = jnp.broadcast_to(jnp.asarray(delta, dtype=jnp.float64), (n,))
+    Delta_arr = jnp.broadcast_to(jnp.asarray(Delta, dtype=jnp.float64), (n,))
+    G_arr = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    return JaxScheme(
+        bvalues=b_arr,
+        bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
+        delta=delta_arr,
+        Delta=Delta_arr,
+        gradient_strengths=G_arr,
+        encoding_type='ste',
     )

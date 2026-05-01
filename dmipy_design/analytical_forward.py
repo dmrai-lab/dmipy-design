@@ -123,6 +123,11 @@ def ball_c4cylinder_forward(
     signals over all N gradient directions in the shell.  This equals the true
     spherical mean when bvecs uniformly sample the hemisphere.
 
+    Handles encoding types:
+    - 'pgse' (default): direction-dependent signal, projects G onto cylinder axis
+    - 'ste': direction-independent; uses spherical mean of cylinder signal
+      (approximation: exact for Ball, powder-average approx for restricted Cylinder)
+
     Parameters
     ----------
     theta : jnp.ndarray, shape (4,), float64
@@ -130,6 +135,7 @@ def ball_c4cylinder_forward(
     scheme : JaxScheme
         Must have: bvalues, bvecs, delta, Delta.
         gradient_strengths is used if present; otherwise derived from b, delta, Delta.
+        encoding_type: 'pgse' (default) or 'ste'.
     diffusion_perpendicular : float
         D_perp for Van Gelderen GPA (m²/s). Default: 1.7e-9 m²/s.
     roots_jax : jnp.ndarray, shape (R,)
@@ -160,30 +166,79 @@ def ball_c4cylinder_forward(
             )
         )
 
-    # --- C4 Cylinder spherical mean ---
-    # Fix cylinder axis to z-hat; the average over the isotropic shell of
-    # gradient directions equals the spherical mean over cylinder orientations.
-    MU = jnp.array([0.0, 0.0, 1.0], dtype=scheme.bvalues.dtype)
+    # Detect encoding type; default to 'pgse' for backward compatibility
+    encoding = getattr(scheme, 'encoding_type', 'pgse')
 
-    # c4cylinder_signal is vectorized over N measurements natively.
-    E_cyl_per_dir = _c4cylinder_signal_full(
-        bvalues=scheme.bvalues,
-        gradient_directions=scheme.bvecs,
-        gradient_strengths=G_vals,
-        delta=scheme.delta,
-        Delta=scheme.Delta,
-        mu_cart=MU,
-        lambda_par=lambda_par,
-        diameter=diameter,
-        diffusion_perpendicular=diffusion_perpendicular,
-        gyromagnetic_ratio=GAMMA,
-        roots_jax=roots_jax,
-    )  # shape (N,)
+    if encoding == 'ste':
+        # STE: B = (b/3)*I — signal is the powder average (spherical mean)
+        # over all cylinder orientations.  We compute this by averaging the
+        # PGSE cylinder signal over 30 isotropic directions with a fixed
+        # cylinder axis z-hat.  Because the shell bvecs uniformly cover the
+        # hemisphere, this average equals the true spherical mean.
+        #
+        # For Ball this is exact: E_STE_ball = exp(-b * lambda_iso)
+        # (already computed above).
+        #
+        # For Cylinder this is the powder-average approximation: valid when
+        # the fibre orientations are isotropically distributed (tumour cells,
+        # WM with unknown orientation).
 
-    # The per-measurement cylinder signal already accounts for the angle
-    # between the gradient direction and the fixed axis.  We return these
-    # per-direction values directly (not averaged) so that the FIM uses
-    # the full directional information from the 30-direction shell.
-    E_cyl = E_cyl_per_dir
+        # Stack the per-direction cylinder signals then average over directions
+        # to obtain one powder-average signal per measurement point.
+        # Build a new scheme with single-direction bvecs equal to the stored
+        # bvecs one row at a time, then average — or more efficiently,
+        # evaluate _c4cylinder_signal_full with fixed axis z-hat (same as the
+        # PGSE path) and average over the N direction rows.
+
+        MU = jnp.array([0.0, 0.0, 1.0], dtype=scheme.bvalues.dtype)
+
+        # E_cyl_per_dir has shape (N,): cylinder signal for each gradient
+        # direction against the fixed axis z-hat.
+        E_cyl_per_dir = _c4cylinder_signal_full(
+            bvalues=scheme.bvalues,
+            gradient_directions=scheme.bvecs,
+            gradient_strengths=G_vals,
+            delta=scheme.delta,
+            Delta=scheme.Delta,
+            mu_cart=MU,
+            lambda_par=lambda_par,
+            diameter=diameter,
+            diffusion_perpendicular=diffusion_perpendicular,
+            gyromagnetic_ratio=GAMMA,
+            roots_jax=roots_jax,
+        )  # shape (N,)
+
+        # All measurements in an STE shell share the same b, delta, Delta so
+        # the spherical mean is simply the mean of E_cyl_per_dir.  Broadcast
+        # the scalar mean back to shape (N,) so the output matches PGSE shape.
+        E_cyl_sm = jnp.mean(E_cyl_per_dir) * jnp.ones_like(E_cyl_per_dir)
+        E_cyl = E_cyl_sm
+
+    else:
+        # PGSE (default): direction-dependent signal
+        # Fix cylinder axis to z-hat; the average over the isotropic shell of
+        # gradient directions equals the spherical mean over cylinder orientations.
+        MU = jnp.array([0.0, 0.0, 1.0], dtype=scheme.bvalues.dtype)
+
+        # c4cylinder_signal is vectorized over N measurements natively.
+        E_cyl_per_dir = _c4cylinder_signal_full(
+            bvalues=scheme.bvalues,
+            gradient_directions=scheme.bvecs,
+            gradient_strengths=G_vals,
+            delta=scheme.delta,
+            Delta=scheme.Delta,
+            mu_cart=MU,
+            lambda_par=lambda_par,
+            diameter=diameter,
+            diffusion_perpendicular=diffusion_perpendicular,
+            gyromagnetic_ratio=GAMMA,
+            roots_jax=roots_jax,
+        )  # shape (N,)
+
+        # The per-measurement cylinder signal already accounts for the angle
+        # between the gradient direction and the fixed axis.  We return these
+        # per-direction values directly (not averaged) so that the FIM uses
+        # the full directional information from the 30-direction shell.
+        E_cyl = E_cyl_per_dir
 
     return vf_ball * E_ball + vf_cyl * E_cyl
