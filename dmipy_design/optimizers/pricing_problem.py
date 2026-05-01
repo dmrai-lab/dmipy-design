@@ -4,9 +4,11 @@ Pricing problem for column generation OED.
 For each waveform type, finds the shell parameters (b, timing, frequency)
 that maximise the reduced cost:
 
-    rc(u) = trace(F_total^{-1} @ F_new(u)) / n_dirs
+    rc(u) = trace(F_total^{-1} @ F_new(u))
 
 where F_new(u) is the FIM of a new 30-direction shell at parameters u.
+The KW threshold is always P (number of parameters), regardless of n_dirs, because
+sum_k w_k trace(F^{-1} F_k) = trace(F^{-1} F_total) = P by construction.
 
 Uses JAX autodiff: jax.value_and_grad through compute_fim_averaged.
 
@@ -160,7 +162,7 @@ def build_rc_objective(
             b, delta, Delta = decode_pgse(v)
             scheme = encode_pgse_shell(b, delta, Delta, bvecs_jax)
             F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
-            return jnp.trace(F_inv @ F_new) / n_dirs
+            return jnp.trace(F_inv @ F_new)
 
     elif wtype == 'ogse':
         n_params_atom = 2
@@ -169,7 +171,7 @@ def build_rc_objective(
             f, G, _b = decode_ogse(v)
             scheme = encode_ogse_shell(f, G, bvecs_jax)
             F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
-            return jnp.trace(F_inv @ F_new) / n_dirs
+            return jnp.trace(F_inv @ F_new)
 
     else:
         raise ValueError(f"Unknown waveform type: '{wtype}'. Choose 'pgse' or 'ogse'.")

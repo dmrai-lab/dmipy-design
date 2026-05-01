@@ -8,12 +8,11 @@ The algorithm alternates between:
 
 Convergence criterion: Kiefer-Wolfowitz (KW) gap < tol.
 
-    KW gap = max_k trace(F_total^{-1} F_k) / n_dirs - P
+    KW gap = max_k trace(F_total^{-1} F_k) - P
 
-At optimality this is ≤ 0 (up to numerical precision). We use
-    kw_gap_rel = kw_gap / P
-
-and converge when kw_gap_rel <= reduced_cost_tol (default 5%).
+The threshold P is exact regardless of n_dirs per shell, because
+sum_k w_k trace(F^{-1} F_k) = trace(F^{-1} F_total) = P by construction.
+At optimality KW gap ≤ 0. We converge when kw_gap_rel = kw_gap/P <= tol (default 5%).
 
 Atoms
 -----
