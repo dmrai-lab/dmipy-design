@@ -242,3 +242,97 @@ def ball_c4cylinder_forward(
         E_cyl = E_cyl_per_dir
 
     return vf_ball * E_ball + vf_cyl * E_cyl
+
+
+def make_snr_forward(
+    forward_fn,
+    T2: float,
+    T1: float = 1.0,
+    S0: float = 1.0,
+):
+    """Wrap a forward function with realistic SNR weighting (T2, T1, S0).
+
+    Returns a new forward function ``(theta, scheme) -> signal`` that computes::
+
+        signal = S0 * exp(-TE / T2) * exp(-TM / T1) * forward_fn(theta, scheme)
+
+    where ``TE`` and ``TM`` are taken from the scheme fields populated by the
+    shell encoders.  For non-PGSTE shells ``TM`` is ``None`` so the T1 term
+    is skipped.
+
+    **Why this matters for OED:**
+
+    Without SNR weighting the FIM treats a shell at b=10 000 s/mm² (signal ≈ 0)
+    the same as a shell at b=1000 s/mm² (signal ≈ 0.3).  With SNR weighting the
+    Jacobian of the absolute signal is multiplied by the T2/T1 attenuation factor,
+    so the FIM contribution naturally collapses for shells whose signal is near
+    the noise floor.  No explicit b_max box constraint is needed (though
+    ``HardwarePreset.b_max`` provides a numerical safety clip).
+
+    **PGSTE advantage modelled here:**
+
+    PGSE at Delta=100 ms, T2=80 ms → T2 factor exp(−200/80) = 0.082
+    PGSTE at delta=15 ms, TM=85 ms, T1=1000 ms →
+        T2 factor exp(−30/80) × T1 factor exp(−85/1000) = 0.687 × 0.919 = 0.631
+    The optimizer will therefore prefer PGSTE for long diffusion times.
+
+    Parameters
+    ----------
+    forward_fn : callable ``(theta: jnp.ndarray, scheme: JaxScheme) -> jnp.ndarray``
+        Base diffusion forward function (normalised E_diff in [0, 1]).
+    T2 : float
+        Tissue T2 (s).  Typical WM 3T: 0.070–0.090 s.
+    T1 : float
+        Tissue T1 (s).  Only applied to PGSTE shells (where ``scheme.TM`` is set).
+        Typical WM 3T: 0.9–1.1 s.  Default 1.0 s.
+    S0 : float
+        Signal amplitude at TE=0, b=0.  Default 1.0.
+
+    Returns
+    -------
+    snr_forward : callable ``(theta, scheme) -> jnp.ndarray``
+        SNR-weighted forward function.  Fully JAX-differentiable.
+
+    Examples
+    --------
+    >>> from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_snr_forward
+    >>> # WM at 3T, PGSTE included in waveform_types
+    >>> forward = make_snr_forward(ball_c4cylinder_forward, T2=0.080, T1=1.0, S0=1.0)
+    >>> result = column_generation_oed(
+    ...     forward_fn=forward, prior_samples=prior, sigma=0.05,
+    ...     waveform_types=['pgse', 'ogse', 'pgste'], ...)
+    """
+    def snr_forward(theta: jnp.ndarray, scheme) -> jnp.ndarray:
+        E_diff = forward_fn(theta, scheme)
+        weight = S0
+        if scheme.TE is not None:
+            weight = weight * jnp.exp(-scheme.TE / T2)
+        if scheme.TM is not None:
+            weight = weight * jnp.exp(-scheme.TM / T1)
+        return weight * E_diff
+
+    return snr_forward
+
+
+def make_t2_forward(
+    forward_fn,
+    T2: float,
+    S0: float = 1.0,
+):
+    """T2-only SNR wrapper.  Backward-compatible alias for make_snr_forward.
+
+    Equivalent to ``make_snr_forward(forward_fn, T2=T2, S0=S0)`` — T1 term
+    is not applied (TM is None for PGSE/OGSE/STE shells).  For PGSTE shells
+    use ``make_snr_forward`` directly to also model the T1 mixing-time cost.
+
+    Parameters
+    ----------
+    forward_fn : callable
+    T2 : float
+    S0 : float
+
+    Returns
+    -------
+    callable ``(theta, scheme) -> jnp.ndarray``
+    """
+    return make_snr_forward(forward_fn, T2=T2, S0=S0)

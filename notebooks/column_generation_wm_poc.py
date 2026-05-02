@@ -35,7 +35,7 @@ import numpy as np
 import jax.numpy as jnp
 from scipy.stats import gamma as gamma_dist
 
-from dmipy_design.analytical_forward import ball_c4cylinder_forward
+from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_snr_forward
 from dmipy_design.optimizers.pricing_problem import encode_pgse_shell, BVECS_30, CLINICAL_3T
 from dmipy_design.optimizers.column_generation import column_generation_oed, Atom
 
@@ -93,19 +93,43 @@ atom0   = Atom(
 )
 print(f"\nInitial atom: PGSE  b=1000 s/mm²  delta=22ms  Delta=45ms")
 print(f"  t_eff = Delta - delta/3 = {(0.045 - 0.022/3)*1e3:.1f} ms")
+print(f"  TE    = 2 × Delta = {2*0.045*1e3:.0f} ms")
+
+# ── T2-weighted forward function ─────────────────────────────────────────────
+# White matter T2 at 3T: ~70–90 ms.  Using 80 ms.
+# TE = 2*Delta for PGSE/STE; TE = 2/f for OGSE.
+# Effect: PGSE shells with delta=60ms, Delta=180ms → TE=360ms → signal crushed.
+#         OGSE at f=100 Hz → TE=20ms → almost no T2 penalty.
+T2_wm = 0.080   # s — WM T2 at 3T (Wansapura 1999)
+T1_wm = 1.000   # s — WM T1 at 3T (Wansapura 1999)
+S0    = 1.0
+
+import math
+forward_snr = make_snr_forward(ball_c4cylinder_forward, T2=T2_wm, T1=T1_wm, S0=S0)
+
+print(f"\nSNR model: T2={T2_wm*1e3:.0f}ms, T1={T1_wm*1e3:.0f}ms (WM at 3T)")
+print(f"  PGSE  delta=22ms, Delta=45ms:  TE=90ms  → "
+      f"T2={math.exp(-0.090/T2_wm):.3f}")
+print(f"  PGSE  delta=60ms, Delta=180ms: TE=360ms → "
+      f"T2={math.exp(-0.360/T2_wm):.3g} (crushed)")
+print(f"  PGSTE delta=22ms, Delta=150ms: TE=44ms, TM=128ms → "
+      f"T2={math.exp(-0.044/T2_wm):.3f} × T1={math.exp(-0.128/T1_wm):.3f} "
+      f"= {math.exp(-0.044/T2_wm)*math.exp(-0.128/T1_wm):.3f} (much better than PGSE)")
+print(f"  OGSE  f=300Hz: TE=6.7ms → T2={math.exp(-0.0067/T2_wm):.3f}")
 
 # ── Run column generation ────────────────────────────────────────────────────
 print("\n" + "=" * 70)
 print("Column Generation OED  —  White Matter Axon Diameter")
 print("Prior: gamma(k=2, scale=0.4µm) diameter, log-uniform diffusivities")
-print("Hardware: clinical 3T scanner (G_max=80 mT/m, PGSE+OGSE+STE)")
+print(f"Hardware: clinical 3T scanner (G_max=80 mT/m, PGSE+OGSE+STE+PGSTE)")
+print(f"T2={T2_wm*1e3:.0f}ms  T1={T1_wm*1e3:.0f}ms  sigma=0.05  b_max=10000 s/mm²")
 print("=" * 70)
 
 result = column_generation_oed(
-    forward_fn         = ball_c4cylinder_forward,
+    forward_fn         = forward_snr,
     prior_samples      = prior,
     sigma              = 0.05,
-    waveform_types     = ['pgse', 'ogse', 'ste'],
+    waveform_types     = ['pgse', 'ogse', 'ste', 'pgste'],
     initial_atoms      = [atom0],
     max_iter           = _MAX_ITER,
     reduced_cost_tol   = 0.05,
@@ -129,6 +153,16 @@ for i, (atom, w) in enumerate(zip(result.atoms, result.weights)):
         t  = 1000.0 / (4.0 * f)
         print(f"{i:<5} {'ogse':<8} {w:.4f}   f={f:.1f}Hz  G={G*1e3:.0f}mT/m  "
               f"b={b/1e6:.3f}s/mm²  t_eff={t:.1f}ms")
+    elif atom.type == 'pgste':
+        b     = atom.params['b']
+        delta = atom.params['delta']
+        Delta = atom.params['Delta']
+        TM    = atom.params.get('TM', Delta - delta)
+        G     = atom.params.get('G', float('nan'))
+        t     = (Delta - delta / 3.0) * 1000.0
+        print(f"{i:<5} {'pgste':<8} {w:.4f}   b={b/1e6:.0f}s/mm²  "
+              f"G={G*1e3:.0f}mT/m  delta={delta*1e3:.1f}ms  Delta={Delta*1e3:.1f}ms  "
+              f"TM={TM*1e3:.1f}ms  t_eff={t:.1f}ms")
     elif atom.type == 'ste':
         b     = atom.params['b']
         delta = atom.params['delta']

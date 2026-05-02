@@ -40,7 +40,7 @@ import jaxopt
 from dataclasses import dataclass
 
 from ..fim import compute_fim_averaged
-from ..jax_scheme_encoder import encode_pgse_shell, encode_ogse_shell, encode_ste_shell
+from ..jax_scheme_encoder import encode_pgse_shell, encode_ogse_shell, encode_ste_shell, encode_pgste_shell
 
 GAMMA = 267513000.0  # rad/(s·T)
 N_DIRS = 30
@@ -64,11 +64,18 @@ class HardwarePreset:
         Minimum PGSE pulse duration (s); enforced by gradient risetime.
     ogse_f_max : float
         Maximum OGSE frequency (Hz).
+    b_max : float
+        Hard upper bound on b-value (s/m²).  Acts as a safety clip in
+        decode_pgse / decode_ste to prevent extreme b-values that would
+        place the signal below the thermal noise floor.  Default 10 000 s/mm²
+        (= 10_000e6 s/m²) — rarely binding once T2 attenuation is included
+        in the forward model, but prevents numerical nonsense in corner cases.
     """
     name: str
     g_max: float
     pgse_delta_min: float
     ogse_f_max: float
+    b_max: float = 10_000e6   # s/m²  (= 10 000 s/mm²)
 
 
 CLINICAL_3T  = HardwarePreset('clinical_3T',  g_max=0.08, pgse_delta_min=0.015, ogse_f_max=300.0)
@@ -155,6 +162,7 @@ def decode_pgse(v, hardware: HardwarePreset = CLINICAL_3T):
     ratio = 1.1 + v[2] * 1.9    # Delta/delta in [1.1, 3.0]
     Delta = delta * ratio
     b     = GAMMA**2 * G**2 * delta**2 * (Delta - delta / 3.0)
+    b     = jnp.minimum(b, hardware.b_max)   # safety clip — rarely binding with T2 model
     return b, delta, Delta
 
 
@@ -179,6 +187,26 @@ def decode_ogse(v, hardware: HardwarePreset = CLINICAL_3T):
     t_eff = 1.0 / (4.0 * f)
     b = GAMMA**2 * G**2 * t_eff**3
     return f, G, b
+
+
+def decode_pgste(v, hardware: HardwarePreset = CLINICAL_3T):
+    """v in [0,1]^3 -> (b, delta, Delta) for PGSTE — identical physics to PGSE.
+
+    PGSTE uses the same (G, delta, Delta) parameterization as PGSE; the
+    difference is the SNR model: TE = 2·delta (short) instead of 2·Delta,
+    with T1 relaxation during the mixing time TM = Delta − delta.
+
+    Parameters
+    ----------
+    v : array-like, shape (3,)
+        Normalised parameters in [0, 1].
+    hardware : HardwarePreset
+
+    Returns
+    -------
+    (b, delta, Delta) as JAX scalars.
+    """
+    return decode_pgse(v, hardware)
 
 
 def decode_ste(v, hardware: HardwarePreset = CLINICAL_3T):
@@ -305,6 +333,15 @@ def solve_pricing(
             F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
             return jnp.trace(F_inv @ F_new)
 
+    elif wtype == 'pgste':
+        n_p = 3
+
+        def rc_fn(v):
+            b, delta, Delta = decode_pgste(v, hardware)
+            scheme = encode_pgste_shell(b, delta, Delta, bvecs_jax)
+            F_new = compute_fim_averaged(forward_fn, prior_samples, scheme, sigma)
+            return jnp.trace(F_inv @ F_new)
+
     else:
         raise ValueError(f"Unknown waveform type: '{wtype}'")
 
@@ -373,5 +410,18 @@ def solve_pricing(
             'Delta': float(Delta),
         }
         best_scheme = encode_ste_shell(b, delta, Delta, bvecs_jax_np)
+
+    elif wtype == 'pgste':
+        b, delta, Delta = decode_pgste(best_v, hardware)
+        G = float(hardware.g_max * 0.1 + best_v[0] * hardware.g_max * 0.9)
+        best_params = {
+            'type': 'pgste',
+            'b': float(b),
+            'G': G,
+            'delta': float(delta),
+            'Delta': float(Delta),
+            'TM': float(Delta) - float(delta),
+        }
+        best_scheme = encode_pgste_shell(b, delta, Delta, bvecs_jax_np)
 
     return best_rc, best_params, best_scheme

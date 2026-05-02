@@ -644,6 +644,316 @@ class TestHardwarePresets:
         )
 
 
+# ============================================================================
+# 12. TE field in shell encoders
+# ============================================================================
+
+class TestTEField:
+
+    def test_pgse_shell_has_te(self, bvecs_30):
+        """encode_pgse_shell populates TE = 2 * Delta."""
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+        delta, Delta = 0.020, 0.040
+        scheme = encode_pgse_shell(1000e6, delta, Delta, bvecs_30)
+        assert scheme.TE is not None, "TE should be populated by encode_pgse_shell"
+        expected_TE = 2.0 * Delta
+        np.testing.assert_allclose(
+            float(scheme.TE[0]), expected_TE, rtol=1e-10,
+            err_msg=f"TE={float(scheme.TE[0])*1e3:.1f}ms, expected {expected_TE*1e3:.1f}ms"
+        )
+
+    def test_ogse_shell_has_te(self, bvecs_30):
+        """encode_ogse_shell populates TE = 2 / freq."""
+        from dmipy_design.jax_scheme_encoder import encode_ogse_shell
+        freq = 100.0
+        scheme = encode_ogse_shell(freq, 0.1, bvecs_30)
+        assert scheme.TE is not None, "TE should be populated by encode_ogse_shell"
+        expected_TE = 2.0 / freq   # 20 ms
+        np.testing.assert_allclose(
+            float(scheme.TE[0]), expected_TE, rtol=1e-10,
+            err_msg=f"TE={float(scheme.TE[0])*1e3:.1f}ms, expected {expected_TE*1e3:.1f}ms"
+        )
+
+    def test_ste_shell_has_te(self, bvecs_30):
+        """encode_ste_shell populates TE = 2 * Delta."""
+        from dmipy_design.jax_scheme_encoder import encode_ste_shell
+        delta, Delta = 0.020, 0.040
+        scheme = encode_ste_shell(1000e6, delta, Delta, bvecs_30)
+        assert scheme.TE is not None, "TE should be populated by encode_ste_shell"
+        expected_TE = 2.0 * Delta
+        np.testing.assert_allclose(
+            float(scheme.TE[0]), expected_TE, rtol=1e-10,
+        )
+
+    def test_ogse_higher_freq_shorter_te(self, bvecs_30):
+        """Higher OGSE frequency → shorter TE (T2 penalty decreases)."""
+        from dmipy_design.jax_scheme_encoder import encode_ogse_shell
+        scheme_low  = encode_ogse_shell(10.0,  0.1, bvecs_30)
+        scheme_high = encode_ogse_shell(500.0, 0.1, bvecs_30)
+        assert float(scheme_high.TE[0]) < float(scheme_low.TE[0]), (
+            f"TE should decrease with frequency: low={float(scheme_low.TE[0])*1e3:.1f}ms, "
+            f"high={float(scheme_high.TE[0])*1e3:.1f}ms"
+        )
+
+    def test_pgse_longer_delta_longer_te(self, bvecs_30):
+        """Longer Delta → longer TE (T2 penalty increases)."""
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+        scheme_short = encode_pgse_shell(1000e6, 0.015, 0.020, bvecs_30)
+        scheme_long  = encode_pgse_shell(1000e6, 0.040, 0.080, bvecs_30)
+        assert float(scheme_long.TE[0]) > float(scheme_short.TE[0])
+
+
+# ============================================================================
+# 13. make_t2_forward
+# ============================================================================
+
+class TestMakeT2Forward:
+
+    def test_make_t2_forward_returns_callable(self, bvecs_30):
+        """make_t2_forward returns a callable."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_t2_forward
+        fwd = make_t2_forward(ball_c4cylinder_forward, T2=0.080, S0=1.0)
+        assert callable(fwd)
+
+    def test_make_t2_forward_applies_t2_attenuation(self, bvecs_30):
+        """T2-weighted signal < base signal for schemes with long TE."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_t2_forward
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+
+        # Long Delta → long TE → strong T2 attenuation
+        scheme = encode_pgse_shell(1000e6, 0.040, 0.080, bvecs_30)  # TE = 160ms
+        theta = jnp.array([0.5, 2e-9, 2e-9, 5e-6], dtype=jnp.float64)
+
+        sig_base = ball_c4cylinder_forward(theta, scheme)
+        sig_t2   = make_t2_forward(ball_c4cylinder_forward, T2=0.080)(theta, scheme)
+
+        # T2 factor = exp(-0.160/0.080) = exp(-2) ≈ 0.135
+        # All T2-weighted values should be < base values
+        assert jnp.all(sig_t2 < sig_base), (
+            "T2-weighted signal should be less than base signal at TE=160ms, T2=80ms"
+        )
+
+    def test_make_t2_forward_t2_factor_correct(self, bvecs_30):
+        """T2-weighted signal = S0 * exp(-TE/T2) * base signal."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_t2_forward
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+        import math
+
+        T2, S0 = 0.080, 1.0
+        Delta = 0.040   # TE = 2*Delta = 0.080s = T2 → factor = exp(-1) ≈ 0.368
+        scheme = encode_pgse_shell(1000e6, 0.020, Delta, bvecs_30)
+        theta = jnp.array([0.5, 2e-9, 2e-9, 5e-6], dtype=jnp.float64)
+
+        sig_base = ball_c4cylinder_forward(theta, scheme)
+        sig_t2   = make_t2_forward(ball_c4cylinder_forward, T2=T2, S0=S0)(theta, scheme)
+
+        expected_factor = S0 * math.exp(-2.0 * Delta / T2)  # TE = 2*Delta
+        np.testing.assert_allclose(
+            np.array(sig_t2), np.array(sig_base) * expected_factor,
+            rtol=1e-6,
+            err_msg="T2 attenuation factor not applied correctly"
+        )
+
+    def test_make_t2_forward_s0_scaling(self, bvecs_30):
+        """S0 scaling is linear: signal(S0=2) = 2 * signal(S0=1)."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_t2_forward
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+
+        scheme = encode_pgse_shell(500e6, 0.020, 0.040, bvecs_30)
+        theta = jnp.array([0.5, 2e-9, 2e-9, 5e-6], dtype=jnp.float64)
+        T2 = 0.080
+
+        sig_s1 = make_t2_forward(ball_c4cylinder_forward, T2=T2, S0=1.0)(theta, scheme)
+        sig_s2 = make_t2_forward(ball_c4cylinder_forward, T2=T2, S0=2.0)(theta, scheme)
+
+        np.testing.assert_allclose(np.array(sig_s2), np.array(sig_s1) * 2.0, rtol=1e-10)
+
+    def test_make_t2_forward_is_differentiable(self, bvecs_30):
+        """make_t2_forward output is JAX-differentiable with respect to theta."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_t2_forward
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell
+
+        scheme = encode_pgse_shell(1000e6, 0.020, 0.040, bvecs_30)
+        theta = jnp.array([0.5, 2e-9, 2e-9, 5e-6], dtype=jnp.float64)
+        fwd = make_t2_forward(ball_c4cylinder_forward, T2=0.080, S0=1.0)
+
+        jac = jax.jacobian(fwd)(theta, scheme)
+        assert jac.shape == (30, 4), f"Expected jacobian shape (30, 4), got {jac.shape}"
+        assert jnp.all(jnp.isfinite(jac)), "Jacobian contains non-finite values"
+
+
+# ============================================================================
+# 14. b_max safety clip in HardwarePreset
+# ============================================================================
+
+class TestBMaxClip:
+
+    def test_hardware_preset_has_b_max(self):
+        """HardwarePreset has a b_max attribute."""
+        from dmipy_design.optimizers.pricing_problem import CLINICAL_3T, CONNECTOM_3T
+        assert hasattr(CLINICAL_3T, 'b_max'), "CLINICAL_3T missing b_max"
+        assert hasattr(CONNECTOM_3T, 'b_max'), "CONNECTOM_3T missing b_max"
+        assert CLINICAL_3T.b_max > 0
+        assert CONNECTOM_3T.b_max > 0
+
+    def test_decode_pgse_clips_at_b_max(self):
+        """decode_pgse clips b at hardware.b_max when physics would exceed it."""
+        from dmipy_design.optimizers.pricing_problem import decode_pgse, HardwarePreset
+
+        # Set a very low b_max so the clip fires at mid-range v
+        hw = HardwarePreset('test', g_max=0.08, pgse_delta_min=0.015,
+                            ogse_f_max=300.0, b_max=500e6)
+        # v = [1, 1, 1]: G=g_max, delta=60ms, ratio=3 → Delta=180ms
+        # b ≈ GAMMA^2 * 0.08^2 * 0.06^2 * (0.18 - 0.02) >> 500e6
+        v = np.array([1.0, 1.0, 1.0])
+        b, delta, Delta = decode_pgse(v, hardware=hw)
+        assert float(b) <= hw.b_max + 1e3, (
+            f"b={float(b)/1e6:.0f} s/mm² exceeds b_max={hw.b_max/1e6:.0f} s/mm²"
+        )
+
+    def test_decode_pgse_below_b_max_unclipped(self):
+        """decode_pgse does not clip b when physics is below b_max."""
+        from dmipy_design.optimizers.pricing_problem import decode_pgse, CLINICAL_3T
+        # Low v: small G, small delta, small ratio → low b
+        v = np.array([0.0, 0.0, 0.0])  # minimum parameters
+        b, delta, Delta = decode_pgse(v, hardware=CLINICAL_3T)
+        assert float(b) < CLINICAL_3T.b_max, (
+            f"b={float(b)/1e6:.1f} s/mm² should be below b_max at minimum v"
+        )
+
+
+# ============================================================================
+# 15. PGSTE shell encoder and SNR advantage
+# ============================================================================
+
+class TestPGSTE:
+
+    def test_pgste_shell_has_correct_te_and_tm(self, bvecs_30):
+        """encode_pgste_shell: TE = 2·delta, TM = Delta − delta."""
+        from dmipy_design.jax_scheme_encoder import encode_pgste_shell
+        delta, Delta = 0.020, 0.100
+        scheme = encode_pgste_shell(1000e6, delta, Delta, bvecs_30)
+
+        assert scheme.TE is not None
+        assert scheme.TM is not None
+        np.testing.assert_allclose(float(scheme.TE[0]), 2.0 * delta, rtol=1e-10,
+                                   err_msg="PGSTE TE should be 2·delta")
+        np.testing.assert_allclose(float(scheme.TM[0]), Delta - delta, rtol=1e-10,
+                                   err_msg="PGSTE TM should be Delta − delta")
+
+    def test_pgste_encoding_type(self, bvecs_30):
+        """encode_pgste_shell sets encoding_type='pgste'."""
+        from dmipy_design.jax_scheme_encoder import encode_pgste_shell
+        scheme = encode_pgste_shell(1000e6, 0.020, 0.100, bvecs_30)
+        assert scheme.encoding_type == 'pgste'
+
+    def test_pgste_same_b_as_pgse(self, bvecs_30):
+        """PGSTE b-value equals PGSE b-value for identical (b, delta, Delta)."""
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell, encode_pgste_shell
+        b0, delta, Delta = 2000e6, 0.020, 0.080
+        pgse  = encode_pgse_shell(b0, delta, Delta, bvecs_30)
+        pgste = encode_pgste_shell(b0, delta, Delta, bvecs_30)
+        np.testing.assert_allclose(
+            np.array(pgste.bvalues), np.array(pgse.bvalues), rtol=1e-10,
+            err_msg="PGSTE and PGSE should have identical b-values"
+        )
+
+    def test_pgste_shorter_te_than_pgse(self, bvecs_30):
+        """PGSTE TE (2·delta) < PGSE TE (2·Delta) for Delta > delta."""
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell, encode_pgste_shell
+        delta, Delta = 0.015, 0.100
+        pgse  = encode_pgse_shell(1000e6, delta, Delta, bvecs_30)
+        pgste = encode_pgste_shell(1000e6, delta, Delta, bvecs_30)
+        assert float(pgste.TE[0]) < float(pgse.TE[0]), (
+            f"PGSTE TE={float(pgste.TE[0])*1e3:.1f}ms should be < "
+            f"PGSE TE={float(pgse.TE[0])*1e3:.1f}ms"
+        )
+
+    def test_pgste_snr_advantage_at_long_delta(self, bvecs_30):
+        """PGSTE SNR factor > PGSE SNR factor for long Delta."""
+        import math
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_snr_forward
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell, encode_pgste_shell
+
+        T2, T1 = 0.080, 1.0
+        delta, Delta = 0.020, 0.150  # long Delta: PGSE TE=300ms, PGSTE TE=40ms+TM=130ms
+
+        scheme_pgse  = encode_pgse_shell(2000e6, delta, Delta, bvecs_30)
+        scheme_pgste = encode_pgste_shell(2000e6, delta, Delta, bvecs_30)
+        theta = jnp.array([0.5, 2e-9, 2e-9, 5e-6], dtype=jnp.float64)
+
+        fwd = make_snr_forward(ball_c4cylinder_forward, T2=T2, T1=T1, S0=1.0)
+        sig_pgse  = fwd(theta, scheme_pgse)
+        sig_pgste = fwd(theta, scheme_pgste)
+
+        # PGSTE signal must be larger (better SNR at long Delta)
+        ratio = float(jnp.mean(sig_pgste) / jnp.mean(sig_pgse))
+        assert ratio > 1.0, (
+            f"PGSTE signal should exceed PGSE at long Delta; ratio={ratio:.3f}"
+        )
+        # At delta=20ms, Delta=150ms: ratio ≈ exp(-(40-300)/80) × exp(-130/1000)
+        # = exp(260/80) / 1 × exp(-0.13) ≈ very large / 0.87
+        # Just check it's substantially larger (> 2×)
+        assert ratio > 2.0, f"PGSTE SNR advantage should be > 2× at this Delta; ratio={ratio:.2f}"
+
+    def test_make_snr_forward_applies_t1_to_pgste_only(self, bvecs_30):
+        """T1 term applied to PGSTE (TM != None) but not to PGSE (TM == None)."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_snr_forward
+        from dmipy_design.jax_scheme_encoder import encode_pgse_shell, encode_pgste_shell
+
+        T2, T1 = 0.080, 1.0
+        delta, Delta = 0.020, 0.040
+        scheme_pgse  = encode_pgse_shell(1000e6, delta, Delta, bvecs_30)
+        scheme_pgste = encode_pgste_shell(1000e6, delta, Delta, bvecs_30)
+        theta = jnp.array([0.5, 2e-9, 2e-9, 5e-6], dtype=jnp.float64)
+
+        fwd = make_snr_forward(ball_c4cylinder_forward, T2=T2, T1=T1)
+
+        sig_pgse  = fwd(theta, scheme_pgse)
+        sig_pgste = fwd(theta, scheme_pgste)
+
+        # PGSE: weight = exp(-TE_pgse / T2) = exp(-80/80) = 0.368
+        # PGSTE: weight = exp(-TE_pgste / T2) * exp(-TM / T1)
+        #             = exp(-40/80) * exp(-20/1000)
+        # PGSTE / PGSE = exp(-40/80) * exp(-20/1000) / exp(-80/80)
+        #              = exp(40/80) * exp(-20/1000) = e^0.5 * 0.98 ≈ 1.62
+        # So for this short Delta, PGSTE still has better signal than PGSE
+        import math
+        expected_ratio = math.exp(0.5) * math.exp(-0.020 / T1)
+        actual_ratio = float(jnp.mean(sig_pgste) / jnp.mean(sig_pgse))
+        np.testing.assert_allclose(actual_ratio, expected_ratio, rtol=1e-4)
+
+    def test_pgste_pricing_returns_valid_rc(self, bvecs_30):
+        """solve_pricing with wtype='pgste' returns best_rc > 0 with TM in params."""
+        from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_snr_forward
+        from dmipy_design.optimizers.pricing_problem import solve_pricing, CLINICAL_3T
+
+        rng = np.random.default_rng(0)
+        M = 16
+        prior = jnp.array(np.column_stack([
+            rng.uniform(0.3, 0.7, M),
+            rng.uniform(1e-9, 3e-9, M),
+            rng.uniform(1.5e-9, 2.5e-9, M),
+            rng.uniform(2e-6, 20e-6, M),
+        ]), dtype=jnp.float64)
+
+        fwd = make_snr_forward(ball_c4cylinder_forward, T2=0.080, T1=1.0)
+        P = prior.shape[1]
+        F_id = np.eye(P, dtype=np.float64)
+
+        best_rc, best_params, best_scheme = solve_pricing(
+            forward_fn=fwd, prior_samples=prior, sigma=0.05,
+            F_total_inv_np=F_id, wtype='pgste',
+            n_restarts=3, rng_seed=0, hardware=CLINICAL_3T,
+        )
+
+        assert best_rc > 0
+        assert best_params['type'] == 'pgste'
+        assert 'TM' in best_params, f"TM missing from params: {best_params}"
+        assert best_scheme.encoding_type == 'pgste'
+        assert best_scheme.TM is not None
+
+
 @pytest.mark.slow
 class TestColumnGenerationOgseDiscovery:
 

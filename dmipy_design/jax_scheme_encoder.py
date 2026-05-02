@@ -59,6 +59,7 @@ class JaxScheme:
     delta: jnp.ndarray
     Delta: jnp.ndarray
     TE: jnp.ndarray | None = None
+    TM: jnp.ndarray | None = None
     gradient_strengths: jnp.ndarray | None = None
     encoding_type: str = 'pgse'
 
@@ -313,13 +314,16 @@ def encode_pgse_shell(
     b_arr     = jnp.broadcast_to(jnp.asarray(b,     dtype=jnp.float64), (n,))
     delta_arr = jnp.broadcast_to(jnp.asarray(delta, dtype=jnp.float64), (n,))
     Delta_arr = jnp.broadcast_to(jnp.asarray(Delta, dtype=jnp.float64), (n,))
-    G_arr = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    G_arr  = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    # TE = 2 * Delta: minimum spin-echo TE with 180° pulse at t = Delta.
+    TE_arr = jnp.broadcast_to(2.0 * jnp.asarray(Delta, dtype=jnp.float64), (n,))
     return JaxScheme(
         bvalues=b_arr,
         bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
         delta=delta_arr,
         Delta=Delta_arr,
         gradient_strengths=G_arr,
+        TE=TE_arr,
     )
 
 
@@ -360,12 +364,17 @@ def encode_ogse_shell(
     # Delta - delta/3 = t_eff  =>  Delta = t_eff + t_eff/3 = 4*t_eff/3
     Delta_arr = jnp.broadcast_to(t_eff + t_eff / 3.0, (n,))
     G_arr     = jnp.broadcast_to(G_j,   (n,))
+    # TE = 2/f: one full oscillation cycle occupies the echo time
+    # (one half-cycle before, one after the 180° refocusing pulse).
+    # At low f this is long → large T2 penalty; at high f this is short → low penalty.
+    TE_arr = jnp.broadcast_to(2.0 / freq_j, (n,))
     return JaxScheme(
         bvalues=b_arr,
         bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
         delta=t_arr,
         Delta=Delta_arr,
         gradient_strengths=G_arr,
+        TE=TE_arr,
     )
 
 
@@ -405,12 +414,72 @@ def encode_ste_shell(
     b_arr     = jnp.broadcast_to(jnp.asarray(b,     dtype=jnp.float64), (n,))
     delta_arr = jnp.broadcast_to(jnp.asarray(delta, dtype=jnp.float64), (n,))
     Delta_arr = jnp.broadcast_to(jnp.asarray(Delta, dtype=jnp.float64), (n,))
-    G_arr = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    G_arr  = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    TE_arr = jnp.broadcast_to(2.0 * jnp.asarray(Delta, dtype=jnp.float64), (n,))
     return JaxScheme(
         bvalues=b_arr,
         bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
         delta=delta_arr,
         Delta=Delta_arr,
         gradient_strengths=G_arr,
+        TE=TE_arr,
         encoding_type='ste',
+    )
+
+
+def encode_pgste_shell(
+    b,
+    delta,
+    Delta,
+    bvecs: jnp.ndarray,
+) -> JaxScheme:
+    """Build a PGSTE (stimulated echo) shell JaxScheme from explicit scalar parameters.
+
+    PGSTE stores magnetization along z during the mixing time TM = Delta − delta,
+    so T2 relaxation only acts during the two short gradient lobes (total 2·delta),
+    while T1 (much longer) acts during TM.  This gives far better SNR than PGSE
+    when Delta ≫ delta.
+
+    The diffusion physics (b-value, effective diffusion time Delta − delta/3) are
+    identical to PGSE — only the SNR model differs:
+
+        PGSE:   S = S0 · exp(−2·Delta / T2) · E_diff
+        PGSTE:  S = S0 · exp(−2·delta / T2) · exp(−TM / T1) · E_diff
+                    where TM = Delta − delta
+
+    Parameters
+    ----------
+    b : scalar
+        b-value (s/m²).
+    delta : scalar
+        Gradient pulse duration (s).
+    Delta : scalar
+        Gradient separation (s).  TM = Delta − delta is derived automatically.
+    bvecs : jnp.ndarray, shape (N, 3)
+        Gradient directions.
+
+    Returns
+    -------
+    JaxScheme with encoding_type='pgste', TE = 2·delta, TM = Delta − delta.
+    """
+    n = bvecs.shape[0]
+    delta_j = jnp.asarray(delta, dtype=jnp.float64)
+    Delta_j = jnp.asarray(Delta, dtype=jnp.float64)
+    b_arr     = jnp.broadcast_to(jnp.asarray(b, dtype=jnp.float64), (n,))
+    delta_arr = jnp.broadcast_to(delta_j, (n,))
+    Delta_arr = jnp.broadcast_to(Delta_j, (n,))
+    G_arr     = jnp.sqrt(b_arr / (_GAMMA**2 * delta_arr**2 * (Delta_arr - delta_arr / 3.0)))
+    # TE = 2·delta: T2 only during the two gradient lobes
+    TE_arr = jnp.broadcast_to(2.0 * delta_j, (n,))
+    # TM = Delta − delta: mixing time (T1 relaxation along z)
+    TM_arr = jnp.broadcast_to(Delta_j - delta_j, (n,))
+    return JaxScheme(
+        bvalues=b_arr,
+        bvecs=jnp.asarray(bvecs, dtype=jnp.float64),
+        delta=delta_arr,
+        Delta=Delta_arr,
+        gradient_strengths=G_arr,
+        TE=TE_arr,
+        TM=TM_arr,
+        encoding_type='pgste',
     )

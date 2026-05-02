@@ -344,3 +344,138 @@ eps_opt ~ sigma_MC / sqrt(N_w * |d^2E/dtheta^2|)
 In practice, `eps = 1e-7` with `N_w = 5000` is stable for typical dMRI signal
 models. The practical check: evaluate E at two different seeds; if the signal
 varies by more than 0.1% (`sigma_MC / E0 > 1e-3`), increase `n_walkers`.
+
+---
+
+## 7. Column generation OED
+
+### 7.1 The mixed-waveform design problem
+
+A continuous design over an acquisition library is a probability measure
+over shells: a set of atoms `{u_k}` (each specifying a waveform type and
+parameters) with weights `w_k >= 0`, `sum_k w_k = 1`.  The FIM of the
+design is:
+
+```
+F(w) = sum_k w_k F_k,    F_k = F(u_k)   (FIM of shell k)
+```
+
+FIM linearity follows because `F` is an expectation over measurements:
+the FIM of a mixture of measurement types is the mixture of their FIMs.
+
+The D-optimal continuous design minimises `-log det(F(w))` over `(w, {u_k})`.
+This is a jointly non-convex problem over the atom parameters and weights.
+Column generation (Fedorov 1972; Atkinson & Donev 1992) solves it exactly
+by alternating between:
+
+1. **Master problem** — D-optimal weight allocation over the current atom
+   library (convex in `w`).
+2. **Pricing problem** — find the new atom with the highest "reduced cost"
+   (most informative addition to the current library).
+
+### 7.2 Master problem
+
+Given a fixed library of K atoms with FIMs `{F_k}`:
+
+```
+min_{w >= 0, sum w = 1}  -log det(sum_k w_k F_k)
+```
+
+The objective is convex in `w` (log-det of a positive linear combination
+of PSD matrices is concave, so its negative is convex).  The analytic
+gradient is:
+
+```
+d(-log det F) / dw_k = -trace(F_total^{-1} F_k)
+```
+
+Solved via scipy SLSQP.  At optimality the gradient of the Lagrangian
+is zero: all atoms with `w_k > 0` achieve equal reduced cost.
+
+### 7.3 Pricing problem
+
+The reduced cost of a new atom `u` (not yet in the library) measures
+how much it would improve the D-optimal objective if added:
+
+```
+rc(u) = trace(F_total^{-1} F_new(u))
+```
+
+This is the directional derivative of `-log det F` in the direction of
+atom `u`.  Adding atom `u` is beneficial if `rc(u) > P` (where P is the
+number of parameters); see §7.4.
+
+The pricing problem maximises `rc(u)` over the waveform parameter space:
+
+```
+max_{u}  trace(F_total^{-1} F_new(u))
+```
+
+For hardware-consistent parameterisation, `u` is encoded via a sigmoid
+reparameterisation `v = sigmoid(u_raw) ∈ (0,1)^n` to handle box constraints
+without explicit bound handling in LBFGS.  All `n_restarts` random starting
+points are vmapped into a single JIT-compiled GPU kernel via `jaxopt.LBFGS`.
+
+### 7.4 Kiefer-Wolfowitz optimality condition
+
+The Kiefer-Wolfowitz (1960) theorem characterises D-optimality:
+
+**Theorem.** A design with FIM `F*` is D-optimal if and only if:
+
+```
+max_{u}  trace(F*^{-1} F(u)) <= P
+```
+
+where the max is over all feasible atoms and P is the number of parameters.
+
+**Why the threshold is exactly P:**  By the trace identity:
+
+```
+sum_k w_k trace(F^{-1} F_k) = trace(F^{-1} sum_k w_k F_k) = trace(F^{-1} F) = P
+```
+
+So the weighted average of reduced costs is always P.  At optimality the
+maximum equals P (all active atoms are tied at P); away from optimality
+the maximum exceeds P.
+
+The KW gap `kw_gap = max_k rc(F_k) - P` measures how far the current
+design is from D-optimality.  Normalised: `kw_gap_rel = kw_gap / P`.
+
+**Interpretation of kw_gap_rel:**
+
+- `kw_gap_rel = 0`: exactly D-optimal (current atom library is sufficient).
+- `kw_gap_rel = 0.05` (5%): the best new atom could improve the
+  D-optimal objective by at most ~5% — sufficient for clinical protocols.
+- `kw_gap_rel = 0.50`: the design is far from optimal; a new atom would
+  substantially improve information.
+
+The default convergence threshold is `reduced_cost_tol = 0.05` (5%).
+
+### 7.5 SNR weighting and the PGSTE advantage
+
+With a fixed noise standard deviation `sigma`, all shells are treated as
+equally noisy.  In practice, T2 relaxation attenuates the absolute signal:
+
+```
+S(theta, scheme) = S0 · exp(-TE/T2) · E_diff(theta, scheme)
+```
+
+The FIM of the SNR-weighted signal is `F_SNR = diag(w)^2 · F_diff / sigma^2`
+where `w_k = S0 · exp(-TE_k/T2)`.  Shells with long TE are down-weighted
+because their Jacobian is scaled by a small factor, not because of an
+explicit constraint.
+
+PGSTE stores magnetisation along z during the mixing time TM = Delta - delta,
+so T2 decay occurs only during the two short gradient lobes (total 2·delta),
+while T1 decay occurs during TM:
+
+```
+PGSE:   w = S0 · exp(-2·Delta / T2)
+PGSTE:  w = S0 · exp(-2·delta / T2) · exp(-TM / T1)
+```
+
+Since T1 >> T2 in tissue (WM at 3T: T1 ≈ 1000 ms, T2 ≈ 80 ms), PGSTE
+achieves much better SNR at long diffusion times while encoding the same
+(b, Delta).  The column generation pricing problem therefore naturally
+discovers PGSTE atoms for large-axon / slow-exchange scenarios and OGSE
+atoms for small-geometry scenarios, without any hard-coded heuristic.

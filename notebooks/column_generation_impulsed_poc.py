@@ -74,31 +74,51 @@ print(f"Initial atom: PGSE  b={b0*1e-6:.0f} s/mm²  delta={delta0*1e3:.0f}ms  De
 print()
 
 # ---------------------------------------------------------------------------
-# 5. Forward function
+# 5. Forward function  (T2-weighted for SNR realism)
 # ---------------------------------------------------------------------------
-from dmipy_design.analytical_forward import ball_c4cylinder_forward
+from dmipy_design.analytical_forward import ball_c4cylinder_forward, make_snr_forward
+
+# Tumour cells at 3T: T2 ≈ 50–70 ms (shorter than normal tissue).
+# Using 0.060 s so the T2 penalty is clearly visible at delta > 30 ms.
+T2_tissue = 0.060   # s — tissue T2 (tumour cells, 3T)
+T1_tissue = 1.300   # s — tissue T1 (tumour cells tend to have longer T1)
+S0        = 1.0
+
+import math
+forward_snr = make_snr_forward(ball_c4cylinder_forward, T2=T2_tissue, T1=T1_tissue, S0=S0)
+
+print(f"SNR model: T2={T2_tissue*1e3:.0f}ms, T1={T1_tissue*1e3:.0f}ms, S0={S0}")
+print(f"  PGSE  delta=20ms, Delta=40ms:   TE=80ms  → "
+      f"T2={math.exp(-0.080/T2_tissue):.3f}")
+print(f"  OGSE  f=100Hz:                  TE=20ms  → "
+      f"T2={math.exp(-0.020/T2_tissue):.3f}")
+print(f"  PGSTE delta=20ms, Delta=100ms:  TE=40ms, TM=80ms → "
+      f"T2={math.exp(-0.040/T2_tissue):.3f} × T1={math.exp(-0.080/T1_tissue):.3f} "
+      f"= {math.exp(-0.040/T2_tissue)*math.exp(-0.080/T1_tissue):.3f}")
+print()
 
 # ---------------------------------------------------------------------------
 # 6. Column generation OED
 # ---------------------------------------------------------------------------
 from dmipy_design.optimizers.column_generation import column_generation_oed
 
-sigma      = 0.05   # noise std (SNR ~20 at b=0)
+sigma      = 0.05   # noise std (SNR ~20 at b=0, S0=1)
 max_iter   = 8
 n_restarts = 5      # pricing restarts per waveform type
 
 print("=" * 70)
 print("Column Generation OED  —  Ball + C4Cylinder (GPA/IMPULSED)")
 print("Waveform types: PGSE + OGSE  |  Hardware: Connectom 3T (300 mT/m)")
-print(f"sigma={sigma},  max_iter={max_iter},  n_pricing_restarts={n_restarts}")
+print(f"T2={T2_tissue*1e3:.0f}ms  sigma={sigma}  max_iter={max_iter}  "
+      f"n_pricing_restarts={n_restarts}")
 print("=" * 70)
 print()
 
 result = column_generation_oed(
-    forward_fn=ball_c4cylinder_forward,
+    forward_fn=forward_snr,
     prior_samples=prior_samples,
     sigma=sigma,
-    waveform_types=['pgse', 'ogse'],
+    waveform_types=['pgse', 'ogse', 'pgste'],
     initial_atoms=[atom0],
     max_iter=max_iter,
     reduced_cost_tol=0.05,
