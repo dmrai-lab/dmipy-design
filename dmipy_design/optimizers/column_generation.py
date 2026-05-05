@@ -102,6 +102,9 @@ def column_generation_oed(
     prune_threshold: float = 1e-3,
     verbose: bool = True,
     hardware: HardwarePreset = CLINICAL_3T,
+    substrate_bank=None,
+    mc_bias_weight: float = 0.0,
+    fim_weight: float = 1.0,
 ) -> CGResult:
     """Column generation OED for dMRI acquisition scheme optimization.
 
@@ -134,6 +137,14 @@ def column_generation_oed(
     hardware : HardwarePreset
         Scanner hardware limits (g_max applies to both PGSE and OGSE).
         Default: CLINICAL_3T (80 mT/m).
+    substrate_bank : SubstrateBank or None
+        MC trajectory substrate bank for bias regularization.
+        When None or mc_bias_weight == 0, behaviour is identical to the
+        unmodified system. Default: None.
+    mc_bias_weight : float
+        β coefficient for the MC bias penalty term. Default 0.0.
+    fim_weight : float
+        α coefficient for the FIM term. Default 1.0.
 
     Returns
     -------
@@ -186,6 +197,9 @@ def column_generation_oed(
                 rng_seed=iteration * 100 + waveform_types.index(wtype),
                 lbfgs_maxiter=lbfgs_maxiter,
                 hardware=hardware,
+                substrate_bank=substrate_bank,
+                mc_bias_weight=mc_bias_weight,
+                fim_weight=fim_weight,
             )
             if rc > best_rc:
                 best_rc   = rc

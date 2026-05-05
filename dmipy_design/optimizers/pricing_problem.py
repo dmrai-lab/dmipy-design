@@ -37,10 +37,12 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jaxopt
+from scipy.optimize import minimize as scipy_minimize
 from dataclasses import dataclass
 
 from ..fim import compute_fim_averaged
 from ..jax_scheme_encoder import encode_pgse_shell, encode_ogse_shell, encode_ste_shell, encode_pgste_shell
+from ..waveform_builders import build_pgse_G, build_ogse_G, build_pgste_G, build_ste_G
 
 GAMMA = 267513000.0  # rad/(s·T)
 N_DIRS = 30
@@ -247,6 +249,73 @@ def _logit(v):
 
 
 # ---------------------------------------------------------------------------
+# Waveform G-array decoder helper
+# ---------------------------------------------------------------------------
+
+def _decode_to_G(v, wtype: str, hardware: HardwarePreset, bvecs_jax, dt_traj: float):
+    """Decode normalised pricing parameters v -> (G_array, dt_wf).
+
+    Builds the (n_meas, n_t, 3) JAX gradient waveform from the normalised
+    parameter vector used by the pricing problem.  dt_wf == dt_traj so no
+    resampling is needed.
+
+    Parameters
+    ----------
+    v : array-like (JAX traced), shape (n_p,)
+        Normalised parameters in [0, 1].
+    wtype : str
+        Waveform type ('pgse', 'ogse', 'ste', 'pgste').
+    hardware : HardwarePreset
+        Scanner hardware limits (for decode_* functions).
+    bvecs_jax : jnp.ndarray, shape (n_dirs, 3)
+        Gradient directions.
+    dt_traj : float
+        Time step to use for constructing the G array (seconds).
+
+    Returns
+    -------
+    G : jnp.ndarray, shape (n_meas, n_t, 3)
+    dt_wf : float  (== dt_traj)
+    """
+    if wtype in ('pgse', 'pgste'):
+        G_amp_scalar = hardware.g_max * 0.1 + v[0] * hardware.g_max * 0.9
+        delta_val    = hardware.pgse_delta_min + v[1] * (0.060 - hardware.pgse_delta_min)
+        ratio_val    = 1.1 + v[2] * 1.9
+        Delta_val    = delta_val * ratio_val
+        # Use concrete Python floats for n_t calculation (not traced)
+        # delta_val and Delta_val are JAX scalars — T_total must be concrete
+        # We compute T_total from decoded concrete float values at trace time.
+        # Since v is [0,1] we can bound: T_total_max = 0.060 * 3.0 + 0.060 = 0.24 s
+        # Use a fixed T_total that covers all possible (delta, Delta) combinations.
+        T_total_fixed = 0.060 * 3.0 + 0.060  # 0.24 s — conservative upper bound
+        if wtype == 'pgse':
+            G_arr = build_pgse_G(G_amp_scalar, delta_val, Delta_val, bvecs_jax,
+                                 dt_traj, T_total=T_total_fixed)
+        else:
+            G_arr = build_pgste_G(G_amp_scalar, delta_val, Delta_val, bvecs_jax,
+                                  dt_traj, T_total=T_total_fixed)
+    elif wtype == 'ogse':
+        f_val    = 10.0 + v[0] * (hardware.ogse_f_max - 10.0)
+        G_amp_scalar = hardware.g_max * 0.1 + v[1] * hardware.g_max * 0.9
+        # T_total = 1/f_min = 1/10 = 0.1 s upper bound
+        T_total_fixed = 1.0 / 10.0
+        G_arr = build_ogse_G(G_amp_scalar, f_val, bvecs_jax, dt_traj,
+                             T_total=T_total_fixed)
+    elif wtype == 'ste':
+        G_amp_scalar = hardware.g_max * 0.1 + v[0] * hardware.g_max * 0.9
+        delta_val    = hardware.pgse_delta_min + v[1] * (0.060 - hardware.pgse_delta_min)
+        ratio_val    = 1.1 + v[2] * 1.9
+        Delta_val    = delta_val * ratio_val
+        T_total_fixed = 6.0 * 0.060 * 3.0  # covers STE staggered pairs
+        G_arr = build_ste_G(G_amp_scalar, Delta_val, bvecs_jax, dt_traj,
+                            T_total=T_total_fixed)
+    else:
+        raise ValueError(f"Unknown waveform type in _decode_to_G: '{wtype}'")
+
+    return G_arr, dt_traj
+
+
+# ---------------------------------------------------------------------------
 # Pricing problem solver (jaxopt LBFGS + vmap over restarts)
 # ---------------------------------------------------------------------------
 
@@ -261,6 +330,9 @@ def solve_pricing(
     bvecs: np.ndarray = BVECS_30,
     lbfgs_maxiter: int = 200,
     hardware: HardwarePreset = CLINICAL_3T,
+    substrate_bank=None,
+    mc_bias_weight: float = 0.0,
+    fim_weight: float = 1.0,
 ):
     """Solve the pricing problem using jaxopt LBFGS vmapped over restarts.
 
@@ -274,7 +346,7 @@ def solve_pricing(
     prior_samples : jnp.ndarray, shape (M, P)
     sigma : float
     F_total_inv_np : np.ndarray, shape (P, P)
-    wtype : str   'pgse', 'ogse', or 'ste'
+    wtype : str   'pgse', 'ogse', 'ste', or 'pgste'
     n_restarts : int
         Number of random restarts; all run in parallel via jax.vmap.
     rng_seed : int
@@ -288,15 +360,37 @@ def solve_pricing(
         Scanner hardware limits (g_max, delta_min, f_max).  PGSE and OGSE
         both use ``hardware.g_max``, ensuring hardware-consistent bounds.
         Default: CLINICAL_3T (80 mT/m).
+    substrate_bank : SubstrateBank or None
+        If provided (and mc_bias_weight > 0), the MC bias term is added to
+        the pricing objective:
+            rc(v) = fim_weight * FIM_rc(v) - mc_bias_weight * B(v)
+        When None or mc_bias_weight == 0, behaviour is identical to the
+        unmodified system.
+    mc_bias_weight : float
+        β coefficient for the MC bias penalty. Default 0.0 (pure FIM).
+    fim_weight : float
+        α coefficient for the FIM term. Default 1.0.
 
     Returns
     -------
     best_rc : float
-        Maximum reduced cost found.
+        Maximum reduced cost found (FIM-only component, for KW gap tracking).
     best_params : dict
         Decoded physical parameters of the best atom.
     best_scheme : JaxScheme
         The shell JaxScheme for the best atom.
+
+    Notes
+    -----
+    When substrate_bank is provided, the MC bias computation runs outside the
+    vmap (one call per pricing restart, not per vmap axis). This avoids
+    replicating the large trajectory arrays. The combined objective is:
+
+        rc_combined(v) = fim_weight * trace(F_inv @ F_new(v))
+                       - mc_bias_weight * B(v; substrate_bank)
+
+    The returned best_rc is the FIM-only component (for KW gap convergence
+    tracking per the plan: KW gap is certified on the FIM term only).
     """
     F_inv = jnp.array(F_total_inv_np, dtype=jnp.float64)
     bvecs_jax = jnp.array(bvecs, dtype=jnp.float64)
@@ -345,36 +439,116 @@ def solve_pricing(
     else:
         raise ValueError(f"Unknown waveform type: '{wtype}'")
 
+    # --- Two-term combined objective (MC bias regularization) ---
+    # When substrate_bank is None or mc_bias_weight == 0, the FIM-only rc_fn
+    # is used unchanged (zero overhead, backward-compatible).
+    #
+    # When substrate_bank is provided, we WRAP rc_fn to add the bias term.
+    # The MC bias computation runs in the un-vmapped Python closure (not
+    # inside the vmap) to avoid replicating the large trajectory arrays.
+    # This is safe because vmap is over restarts (u0 vectors), not over the
+    # objective evaluations. Each restart independently calls the combined
+    # objective — the closure captures substrate_bank by reference.
+    fim_rc_fn = rc_fn   # keep a reference to the FIM-only function
+
+    if substrate_bank is not None and mc_bias_weight > 0.0:
+        _fim_rc_fn = rc_fn  # alias for closure
+        dt_traj = float(substrate_bank.entries[0].dt_traj) if substrate_bank.entries else 1e-4
+
+        def rc_fn(v):
+            fim_val = _fim_rc_fn(v)
+            G_arr, dt_wf = _decode_to_G(v, wtype, hardware, bvecs_jax, dt_traj)
+            # Build a simple scheme for the analytical forward call
+            # Use the decoded physical parameters to construct a JaxScheme
+            if wtype in ('pgse', 'pgste'):
+                _b, _delta, _Delta = decode_pgse(v, hardware)
+                if wtype == 'pgse':
+                    _scheme = encode_pgse_shell(_b, _delta, _Delta, bvecs_jax)
+                else:
+                    _scheme = encode_pgste_shell(_b, _delta, _Delta, bvecs_jax)
+            elif wtype == 'ogse':
+                _f, _G, _b = decode_ogse(v, hardware)
+                _scheme = encode_ogse_shell(_f, _G, bvecs_jax)
+            elif wtype == 'ste':
+                _b, _delta, _Delta = decode_ste(v, hardware)
+                _scheme = encode_ste_shell(_b, _delta, _Delta, bvecs_jax)
+            else:
+                _scheme = None
+            bias_val = substrate_bank.compute_bias_jax(G_arr, dt_wf, forward_fn, _scheme, sigma)
+            return fim_weight * fim_val - mc_bias_weight * bias_val.astype(jnp.float64)
+
     # Sigmoid reparameterization: optimize over unbounded u; v = sigmoid(u)
     def neg_rc_transformed(u):
         v = _sigmoid(u)
         return -rc_fn(v)
 
-    # jaxopt LBFGS over transformed (unbounded) space
-    lbfgs = jaxopt.LBFGS(fun=neg_rc_transformed, maxiter=lbfgs_maxiter, tol=1e-6)
+    # JIT-compile only the FIM part (no trajectory arrays in closure → no 12 GB constants).
+    # Bias (MC trajectory replay) is called outside JIT: the trajectory arrays are in the
+    # substrate_bank closure and would otherwise be captured as XLA compile-time constants,
+    # triggering a "12.01 GB constants captured" warning and slow recompilation on each call.
+    # scipy L-BFGS-B with numerical FD gradients avoids jit(grad(vmap(jacfwd))) which
+    # triggers CUDA graph capture failures on some GPU configurations (e.g. L40S).
+    _fim_rc_jit = jax.jit(fim_rc_fn)   # JIT: small FIM matrices, no large arrays
 
-    # Sample initial points in [0.05, 0.95]^n, transform to unbounded space
-    v0_batch = jnp.array(
-        rng.uniform(0.05, 0.95, size=(n_restarts, n_p)), dtype=jnp.float64
-    )
-    u0_batch = _logit(v0_batch)
+    # Decode v → G_array once per call (outside JIT); also builds the analytical scheme.
+    dt_traj = float(substrate_bank.entries[0].dt_traj) if (
+        substrate_bank is not None and substrate_bank.entries
+    ) else 1e-4
 
-    # vmap over restarts — all run in parallel as one JIT kernel
-    def run_one(u0):
-        result = lbfgs.run(u0)
-        v_opt = _sigmoid(result.params)
-        rc_val = rc_fn(v_opt)
-        return v_opt, rc_val
+    def _combined_rc(v_jnp):
+        """Combined reduced cost: FIM term + MC bias term (bias outside JIT)."""
+        fim_val = float(_fim_rc_jit(v_jnp))
+        if substrate_bank is None or mc_bias_weight == 0.0:
+            return fim_val
+        G_arr, dt_wf = _decode_to_G(v_jnp, wtype, hardware, bvecs_jax, dt_traj)
+        if wtype in ('pgse', 'pgste'):
+            _b, _delta, _Delta = decode_pgse(v_jnp, hardware)
+            _scheme = encode_pgse_shell(_b, _delta, _Delta, bvecs_jax) if wtype == 'pgse' \
+                      else encode_pgste_shell(_b, _delta, _Delta, bvecs_jax)
+        elif wtype == 'ogse':
+            _f, _G, _b = decode_ogse(v_jnp, hardware)
+            _scheme = encode_ogse_shell(_f, _G, bvecs_jax)
+        elif wtype == 'ste':
+            _b, _delta, _Delta = decode_ste(v_jnp, hardware)
+            _scheme = encode_ste_shell(_b, _delta, _Delta, bvecs_jax)
+        else:
+            _scheme = None
+        bias_val = float(
+            substrate_bank.compute_bias_jax(G_arr, dt_wf, forward_fn, _scheme, sigma)
+        )
+        return fim_weight * fim_val - mc_bias_weight * bias_val
 
-    run_batch = jax.jit(jax.vmap(run_one))
-    v_opts, rc_vals = run_batch(u0_batch)
+    def _scipy_obj(v_np):
+        v = jnp.array(v_np, dtype=jnp.float64)
+        return -_combined_rc(v)   # scipy minimises; negate for maximisation
 
-    # Pick best restart
+    # Sample initial points in [0.05, 1.0]^n (bounded space for L-BFGS-B)
+    v0_batch = rng.uniform(0.05, 0.95, size=(n_restarts, n_p))
+
+    v_opts_list  = []
+    rc_vals_list = []
+    for i in range(n_restarts):
+        res = scipy_minimize(
+            _scipy_obj, v0_batch[i],
+            method='L-BFGS-B',
+            bounds=[(0.0, 1.0)] * n_p,
+            options={'maxiter': lbfgs_maxiter, 'ftol': 1e-9, 'gtol': 1e-6},
+        )
+        v_opt_i = jnp.array(np.clip(res.x, 0.0, 1.0), dtype=jnp.float64)
+        rc_val_i = jnp.array(_combined_rc(v_opt_i), dtype=jnp.float64)
+        v_opts_list.append(v_opt_i)
+        rc_vals_list.append(rc_val_i)
+    v_opts  = jnp.stack(v_opts_list)
+    rc_vals = jnp.stack(rc_vals_list)
+
+    # Pick best restart (ranked by combined objective rc_fn, which may include bias)
     best_idx = int(jnp.argmax(rc_vals))
-    best_rc  = float(rc_vals[best_idx])
     best_v   = np.array(v_opts[best_idx])
+    best_v   = np.clip(best_v, 0.0, 1.0)
 
-    best_v = np.clip(best_v, 0.0, 1.0)
+    # Return the FIM-only reduced cost for KW gap tracking (plan §Convergence criterion)
+    best_rc  = float(_fim_rc_jit(jnp.array(best_v, dtype=jnp.float64)))
+
     bvecs_jax_np = jnp.array(bvecs, dtype=jnp.float64)
 
     if wtype == 'pgse':
