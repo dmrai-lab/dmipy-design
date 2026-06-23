@@ -166,3 +166,30 @@ STE and OGSE dicts use `"b_values"` (with underscore) as the key, while
 `JaxScheme` uses `.bvalues` (no underscore). The `_scheme_to_jaxscheme`
 function handles both. Do not mix the two naming conventions in new code —
 use `"b_values"` in dict encoders and `.bvalues` in `JaxScheme`.
+
+---
+
+## Tensor-valued waveform designer (`optimizers/waveform_designer.py`)
+
+`encode_ste` only *asserts* `B=(b/3)I` with a guessed b — it is not a real,
+hardware-realizable waveform.  `design_waveform(b_delta, ...)` subsumes it: it
+optimizes an actual physical gradient `g(t)` with a **finite-180 spin echo built
+in** (the sign flip enters `q(t)`, so refocusing `q(TE)=0` is intrinsic — unlike
+loaded effective-only waveforms such as OPTICUBE, which have no 180), achieving
+any target b-tensor shape (`b_delta`: 1 LTE, 0 STE, -0.5 PTE) while maximizing b
+under Prisma hardware (G_max=0.08, slew=200, TE).  Use `design.to_sim_waveform()`
+to hand the real gradient to the dmipy-sim MC forward / mc_bridge.
+
+Solver: JAX augmented Lagrangian (slew + amplitude are structural via radial
+tanh; refocus/shape/endpoints are equality constraints with multipliers), inner
+jaxopt L-BFGS, vmapped multi-restart on GPU.  **Use the AL — do not revert to
+fixed-penalty continuation**: the penalty weights cannot be balanced (too weak →
+constraint violations, too strong → b collapses to a tiny on-shape blob).
+Validated in three tiers (`tests/test_waveform_designer.py`): validity gates;
+LTE recovers the analytic max-b (triangular q, ~19500 s/mm² at TE=80 ms); and the
+**MC arbiter** — STE is orientation-invariant on an anisotropic cylinder (CV~0.5%
+vs LTE ~29%) and every shape gives `exp(-bD)` on free diffusion.
+
+NB: the small (3×3) b-tensor contraction must be an explicit outer-product sum,
+not `einsum`/matmul — the matmul triggers an XLA "too small divisible part of the
+contracting dimension" failure inside `jax.vmap` on GPU.
