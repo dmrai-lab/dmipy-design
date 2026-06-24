@@ -3,7 +3,7 @@ from .greedy_sequential import greedy_add_measurement
 from .master_problem import solve_master
 from .pricing_problem import solve_pricing, decode_pgse, decode_ogse, BVECS_30
 from .column_generation import column_generation_oed, Atom, CGResult
-from .waveform_designer import design_waveform, WaveformDesign
+from .waveform_designer import design_waveform, WaveformDesign, SequenceTiming
 
 __all__ = [
     "gradient_oed",
@@ -18,4 +18,5 @@ __all__ = [
     "CGResult",
     "design_waveform",
     "WaveformDesign",
+    "SequenceTiming",
 ]

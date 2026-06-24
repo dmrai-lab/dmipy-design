@@ -1,20 +1,43 @@
 """
 Tensor-valued diffusion gradient-waveform designer (NOW-style, JAX/GPU).
 
-Generates a hardware-realizable *physical* gradient waveform ``g(t)`` with a
+Generates a hardware-realizable physical gradient waveform ``g(t)`` with a
 finite-180 spin echo built in, achieving a target b-tensor shape
 (``b_delta``: LTE = 1, STE = 0, PTE = -0.5, or any value in [-0.5, 1]) while
-maximizing the b-value under Prisma-class hardware (G_max, slew, TE).  Subsumes
-the analytic placeholder STE encoding (``B = (b/3) I`` asserted, no waveform).
+maximizing the b-value under Prisma-class hardware (G_max, slew, TE).  The
+finite 180 is intrinsic: the spin-echo sign flip enters ``q(t)``, so static-spin
+refocusing ``q(TE) = 0`` is part of the optimization (an effective-only waveform
+carrying no 180 cannot refocus a static field — susceptibility/off-resonance).
 
-Optional, toggleable constraints (the full NOW objective set):
-  * ``null_M1``  — velocity compensation:      ∫ t · g_eff dt = 0
-  * ``null_M2``  — acceleration compensation:  ∫ t² · g_eff dt = 0
-  * ``maxwell``  — concomitant-field (Maxwell) compensation:
-                   M = ∫ s(t) · g gᵀ dt = 0   (Szczepankiewicz 2019)
-Each flag adds its constraint to the augmented Lagrangian; *all* of the moment /
-Maxwell indices are always reported (whether constrained or not), so toggling a
-flag shows exactly what changed (and what it cost in b).
+Robustness constraints (ON by default; turn off only with justification)
+------------------------------------------------------------------------
+Shape, refocusing and the hardware box are always enforced — that is the minimum
+for a valid waveform.  On top of that, three constraints suppress real
+acquisition confounds.  They default ON because leaving a *needed* one off
+BIASES the measurement, whereas turning an unneeded one on only costs b-value
+(SNR).  So disable one only when its confound is demonstrably absent:
+
+  * ``null_M1`` — velocity compensation, ``∫ t·g_eff dt = 0``.  Off ⇒ the signal
+    is sensitive to bulk velocity (cardiac pulsation, CSF/flow, perfusion):
+    velocity-dependent dephasing masquerades as diffusion and biases the metrics,
+    worst at high b and near vessels/ventricles/cord.  Costs the most b (~4×; the
+    classic flow-comp penalty).  Safe to disable only for static samples
+    (ex-vivo, fixed tissue, phantoms) or low b.
+  * ``null_M2`` — acceleration compensation, ``∫ t²·g_eff dt = 0``.  Second-order
+    (pulsatile) motion.  Safe to disable when velocity comp alone is adequate
+    (commonly so in vivo); keep on for strongly pulsatile regimes.
+  * ``maxwell`` — concomitant-field (Maxwell) compensation, ``∫ s·g·gᵀ dt = 0``
+    (Szczepankiewicz 2019).  Concomitant fields ∝ g²/B0 add a spatially-varying
+    phase that does not refocus for time-ASYMMETRIC waveforms, biasing the
+    b-tensor metrics across the FOV (worse off-isocenter, low B0, strong
+    gradients).  It is automatically ~0 for time-symmetric waveforms (cheap/free
+    there) and only bites for asymmetric designs (which are used to shorten TE /
+    gain SNR).  Safe to disable for symmetric waveforms or near-isocenter,
+    high-B0, small-FOV work.
+
+All three indices (``m1_index``, ``m2_index``, ``maxwell_index``) are reported on
+the result regardless of which flags were active, so the residual confound is
+always visible — even for a constraint left off.
 
 Physics (the metrics double as the constraint functions)
 --------------------------------------------------------
@@ -28,8 +51,7 @@ Effective dephasing with the 180 sign flip folded in::
     M_k  = integral t^k g_eff dt                       (gradient moments)
     Maxw = integral s g g^T dt                         (concomitant matrix)
 
-Refocusing (echo, M0): ``q(TE) = 0`` — intrinsic because the sign flip enters
-``q`` (this is what an effective-only loaded waveform, e.g. OPTICUBE, lacks).
+Refocusing (echo) is the zeroth moment condition ``q(TE) = 0`` (= M0 = 0).
 
 Parameterization (both hardware limits structural)
 --------------------------------------------------
@@ -69,6 +91,83 @@ GAMMA = 267.513e6  # rad/s/T — matches dmipy_sim.constants.GAMMA
 CONSTRAINT_NAMES = ('refocus', 'shape', 'g(TE)=0', 'RF-window', 'slew',
                     'M1', 'M2', 'maxwell')
 _BASE_CONSTRAINTS = (0, 1, 2, 3, 4)   # always active (validity)
+
+
+@dataclass
+class SequenceTiming:
+    """Physical diffusion spin-echo timing budget that pins the encoding windows.
+
+    The 180 sits at TE/2 (spin-echo refocus condition).  Diffusion encoding is OFF
+    during the excitation lead-in, across the 180 (+crushers), and during the
+    readout tail; the two remaining windows (pre-/post-180) are generally UNEQUAL
+    because ``t_prep+t_excite ≠ t_readout_pre_echo``.  So any pre/post asymmetry of
+    the optimized waveform is a *consequence* of this budget, never a free knob::
+
+        [prep+excite] [== pre-180 encode ==] [180] [== post-180 encode ==] [readout→echo]
+        0             t_lead                 TE/2∓t_refocus/2          TE−t_ro_pre   TE
+
+    All times in seconds.  Pass to ``design_waveform(..., timing=...)`` and the
+    encoding-window masks + 180 position are derived (overriding echo_frac /
+    rf_duration).  Build it from a real sequence with ``from_pulseq``, or from a
+    readout description with ``from_readout``.
+    """
+    t_excite: float                  # 90 RF duration; encoding starts after it
+    t_refocus: float                 # 180 RF (+crusher) duration; off across it at TE/2
+    t_readout_pre_echo: float        # readout start → echo; post-180 encode ends by TE−this
+    t_prep: float = 0.0              # optional fat-sat/prep before encoding
+    TE: float | None = None          # native echo time (e.g. read from a .seq); masks() default
+
+    @property
+    def t_lead(self) -> float:
+        """Dead time from t=0 (excitation centre) until encoding may begin."""
+        return self.t_prep + self.t_excite
+
+    def min_TE(self) -> float:
+        """Smallest TE for which both the pre- and post-180 encoding windows exist."""
+        return max(2.0 * (self.t_lead + self.t_refocus / 2.0),
+                   2.0 * (self.t_readout_pre_echo + self.t_refocus / 2.0))
+
+    def masks(self, TE=None, n_t=256):
+        """Return ``(slew_off_mask (n_t,1) float, echo_idx int)`` for a given TE.
+
+        ``slew_off_mask`` is 1 in the two encoding windows and 0 in the off-regions
+        (excitation lead-in, the 180, the readout tail), so the optimizer's gradient
+        lives only where the hardware allows it.  The 180 (echo_idx) is at TE/2.
+        """
+        TE = float(TE if TE is not None else self.TE)
+        if TE < self.min_TE() - 1e-9:
+            raise ValueError(
+                f"TE={TE*1e3:.2f} ms is below min_TE={self.min_TE()*1e3:.2f} ms for "
+                f"this timing (encoding windows would vanish).")
+        dt = TE / (n_t - 1)
+        t = np.arange(n_t) * dt
+        echo = TE / 2.0
+        on = np.ones(n_t, dtype=np.float64)
+        on[t < self.t_lead] = 0.0                                   # excitation lead-in
+        on[np.abs(t - echo) <= self.t_refocus / 2.0] = 0.0          # 180 (+crusher)
+        on[t > TE - self.t_readout_pre_echo] = 0.0                  # readout tail
+        return on[:, None], int(round(echo / dt))
+
+    @classmethod
+    def from_readout(cls, *, t_excite, t_refocus, readout_duration, partial_fourier,
+                     t_prep=0.0, TE=None):
+        """Build from a readout description.  The echo (k-space centre) sits
+        ``(pf−0.5)/pf`` into the readout, so partial Fourier (pf<1) shortens the
+        post-180 window — exactly the mechanism that makes the optimum asymmetric."""
+        pf = float(partial_fourier)
+        if not (0.5 <= pf <= 1.0):
+            raise ValueError(f"partial_fourier must be in [0.5, 1.0]; got {pf}")
+        return cls(float(t_excite), float(t_refocus),
+                   float(readout_duration) * (pf - 0.5) / pf, float(t_prep), TE)
+
+    @classmethod
+    def from_pulseq(cls, src):
+        """Read the timing budget (and native TE) from a Pulseq ``.seq`` via
+        ``dmipy_sim.sequences.pulseq.pulseq_timing`` (first RF=90, second=180, one ADC)."""
+        from dmipy_sim.sequences.pulseq import pulseq_timing
+        d = pulseq_timing(src)
+        return cls(t_excite=d['t_excite'], t_refocus=d['t_refocus'],
+                   t_readout_pre_echo=d['t_readout_pre_echo'], TE=d['TE'])
 
 
 # ===========================================================================
@@ -201,9 +300,9 @@ class WaveformDesign:
     def to_sim_waveform(self, b_target: float | None = None):
         """Build a dmipy-sim ``Waveform`` (effective gradient, echo at TE) for MC.
 
-        Subsumes the analytic STE placeholder: hands the real hardware-realizable
-        gradient to the forward/MC pipeline.  ``b_target`` (s/m²) optionally
-        rescales the amplitude (b ∝ |G|²; b-tensor shape and refocusing invariant).
+        Hands the physical gradient to the dmipy-sim forward / MC pipeline.
+        ``b_target`` (s/m²) optionally rescales the amplitude (b ∝ |G|²; the
+        b-tensor shape and refocusing are invariant under the rescale).
         """
         from dmipy_sim.waveforms import Waveform
         G = self.effective_G()
@@ -218,17 +317,18 @@ def design_waveform(
     *,
     G_max: float = 0.08,
     slew_rate_max: float = 200.0,
-    TE: float = 0.080,
+    TE: float = None,
     n_t: int = 256,
     echo_frac: float = 0.5,
     rf_duration: float = 0.004,
-    null_M1: bool = False,
-    null_M2: bool = False,
-    maxwell: bool = False,
+    timing: 'SequenceTiming' = None,
+    null_M1: bool = True,
+    null_M2: bool = True,
+    maxwell: bool = True,
     n_restarts: int = 48,
     seed: int = 0,
     inner_maxiter: int = 300,
-    n_outer: int = 14,
+    n_outer: int = 16,
     verbose: bool = False,
 ) -> WaveformDesign:
     """Design a hardware-realizable tensor-valued spin-echo gradient waveform.
@@ -239,10 +339,15 @@ def design_waveform(
         Target b-tensor shape: 1 = LTE, 0 = STE, -0.5 = PTE.
     G_max, slew_rate_max, TE : float
         Hardware constraints (T/m, T/m/s, s).  Defaults are 3T Prisma.
-    null_M1, null_M2 : bool
-        Add velocity (M1) / acceleration (M2) moment-nulling constraints.
-    maxwell : bool
-        Add concomitant-field (Maxwell) compensation: ∫ s·g·gᵀ dt = 0.
+    null_M1, null_M2, maxwell : bool, default True
+        Robustness constraints (velocity / acceleration moment nulling and
+        concomitant-field compensation).  ON by default — disabling one only
+        when its confound is absent (static sample, symmetric waveform, …); see
+        the "Robustness constraints" section of the module docstring for the
+        bias each suppresses, the b-cost, and when it is safe to turn off.  The
+        fully-constrained problem is the hardest to converge; if a heavily
+        constrained design comes back ``feasible=False``, raise ``n_restarts`` /
+        ``n_outer``.
     n_t, echo_frac, rf_duration : see module docstring.
     n_restarts, seed, inner_maxiter, n_outer : solver controls.
 
@@ -256,10 +361,19 @@ def design_waveform(
     if not _JAX_AVAILABLE:
         raise ImportError("JAX + jaxopt are required for design_waveform.")
 
+    # Resolve TE: explicit > timing's native TE > default.
+    if TE is None:
+        TE = timing.TE if (timing is not None and timing.TE is not None) else 0.080
     dt = TE / (n_t - 1)
-    echo_idx = int(round(echo_frac * (n_t - 1)))
     t = np.arange(n_t) * dt
-    rf_mask_np = (np.abs(t - echo_idx * dt) <= 0.5 * rf_duration).astype(np.float64)
+    if timing is not None:
+        # Real sequence budget pins the encoding windows + the 180 (TE/2); echo_frac
+        # / rf_duration are ignored and any pre/post asymmetry is derived, not chosen.
+        slew_off_np, echo_idx = timing.masks(TE, n_t)        # (n_t,1), int
+        rf_mask_np = 1.0 - slew_off_np[:, 0]                  # g≈0 in ALL off-regions
+    else:
+        echo_idx = int(round(echo_frac * (n_t - 1)))
+        rf_mask_np = (np.abs(t - echo_idx * dt) <= 0.5 * rf_duration).astype(np.float64)
     rf_mask = jnp.asarray(rf_mask_np)
     slew_off_mask = jnp.asarray(1.0 - rf_mask_np)[:, None]
     t_arr = jnp.asarray(t)

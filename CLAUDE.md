@@ -171,34 +171,56 @@ use `"b_values"` in dict encoders and `.bvalues` in `JaxScheme`.
 
 ## Tensor-valued waveform designer (`optimizers/waveform_designer.py`)
 
-`encode_ste` only *asserts* `B=(b/3)I` with a guessed b — it is not a real,
-hardware-realizable waveform.  `design_waveform(b_delta, ...)` subsumes it: it
-optimizes an actual physical gradient `g(t)` with a **finite-180 spin echo built
-in** (the sign flip enters `q(t)`, so refocusing `q(TE)=0` is intrinsic — unlike
-loaded effective-only waveforms such as OPTICUBE, which have no 180), achieving
-any target b-tensor shape (`b_delta`: 1 LTE, 0 STE, -0.5 PTE) while maximizing b
-under Prisma hardware (G_max=0.08, slew=200, TE).  Use `design.to_sim_waveform()`
-to hand the real gradient to the dmipy-sim MC forward / mc_bridge.
+`design_waveform(b_delta, ...)` optimizes a hardware-realizable physical gradient
+`g(t)` with a finite-180 spin echo built in, achieving any target b-tensor shape
+(`b_delta`: 1 LTE, 0 STE, -0.5 PTE) while maximizing b under Prisma hardware
+(G_max=0.08, slew=200, TE).  The 180 is intrinsic — the sign flip enters `q(t)`,
+so refocusing `q(TE)=0` is part of the optimization (an effective-only waveform
+with no 180 cannot refocus a static field).  `design.to_sim_waveform()` hands the
+gradient to the dmipy-sim forward / mc_bridge.
 
-**Toggleable constraints** (the full NOW objective set) — `null_M1` (velocity:
-∫t·g_eff=0), `null_M2` (acceleration: ∫t²·g_eff=0), `maxwell` (concomitant:
-∫s·g·gᵀ=0, Szczepankiewicz 2019).  Each flag adds its term to the AL; *all*
-indices (`m1_index`, `m2_index`, `maxwell_index`) are always reported regardless,
-so toggling shows what changed and the b-cost.  On an asymmetric echo (frac≠0.5,
-where these are naturally non-zero) the trade-off is stark: LTE baseline
-b≈18800 s/mm² (M1≈0.25) → `null_M1` nulls M1 to <0.01 but costs ~4× b (≈4300,
-the classic flow-comp penalty); `maxwell` nulls it cheaply (~15% b); all three
-together cost the most.
+**Robustness constraints — ON by default**, opt out per flag: `null_M1`
+(velocity, ∫t·g_eff=0), `null_M2` (acceleration, ∫t²·g_eff=0), `maxwell`
+(concomitant field, ∫s·g·gᵀ=0; Szczepankiewicz 2019).  They default on because a
+*needed-but-off* constraint BIASES the measurement, while an unneeded one only
+costs b (SNR).  Turn one off only when its confound is absent — `null_M1`/`null_M2`
+for static samples (ex-vivo/phantom) or low b; `maxwell` for time-symmetric
+waveforms (where it is ~0 anyway) or near-isocenter/high-B0. The full rationale
+(bias, cost, when-safe) lives in the module docstring's "Robustness constraints"
+section — read it before disabling a flag.  All three indices (`m1_index`,
+`m2_index`, `maxwell_index`) are always reported, so the residual is visible even
+when a flag is off.  Cost is real: e.g. velocity comp is ~4× b (the flow-comp
+penalty), Maxwell on a symmetric waveform is free.  Fully-constrained designs are
+the hardest to converge — raise `n_restarts`/`n_outer` if `feasible=False`.
 
-Solver: JAX augmented Lagrangian (slew + amplitude are structural via radial
-tanh; refocus/shape/endpoints are equality constraints with multipliers), inner
-jaxopt L-BFGS, vmapped multi-restart on GPU.  **Use the AL — do not revert to
-fixed-penalty continuation**: the penalty weights cannot be balanced (too weak →
-constraint violations, too strong → b collapses to a tiny on-shape blob).
-Validated in three tiers (`tests/test_waveform_designer.py`): validity gates;
-LTE recovers the analytic max-b (triangular q, ~19500 s/mm² at TE=80 ms); and the
-**MC arbiter** — STE is orientation-invariant on an anisotropic cylinder (CV~0.5%
-vs LTE ~29%) and every shape gives `exp(-bD)` on free diffusion.
+Solver: JAX augmented Lagrangian (slew + amplitude structural via radial tanh;
+refocus/shape/endpoints/M1/M2/Maxwell are equality constraints with multipliers),
+inner jaxopt L-BFGS, vmapped multi-restart on GPU.  **Use the AL — do not revert
+to fixed-penalty continuation**: penalty weights cannot be balanced (too weak →
+violations, too strong → b collapses to a tiny on-shape blob).  Validated in
+`tests/test_waveform_designer.py`: validity gates; LTE recovers the analytic
+max-b (triangular q, ~19500 s/mm² at TE=80 ms); MC arbiter via dmipy-sim — STE is
+orientation-invariant on an anisotropic cylinder (CV~0.5% vs LTE ~29%) and every
+shape gives `exp(-bD)` on free diffusion; and the constraint indices drop to ~0
+when their flag is on.
+
+**Real timing → `SequenceTiming` (no asymmetry knob).** Don't ask the user for
+"0.3 asymmetry" — asymmetry is a *consequence* of the sequence timing, not a
+choice.  `SequenceTiming(t_excite, t_refocus, t_readout_pre_echo, t_prep)` holds
+the physical budget; the 180 is pinned at TE/2 (spin-echo) and the encoding is
+OFF during the excitation lead-in, the 180, and the readout tail.  Because
+lead-in ≠ readout-pre-echo, the pre/post-180 windows come out unequal — the
+optimum is asymmetric as an *output*.  Build it from a readout
+(`SequenceTiming.from_readout(..., partial_fourier=…)` — PF<1 shortens the
+post-180 window, the real TE-shortening mechanism) or from a scanner sequence
+(`SequenceTiming.from_pulseq(seq)`, reading the 90/180/ADC schedule via
+`dmipy_sim.sequences.pulseq.pulseq_timing`).  Pass `design_waveform(..., timing=…)`
+and the masks + 180 position are derived (echo_frac/rf_duration ignored).
+Round-trip in practice: scanner Opts (`PULSEQ_SYSTEMS`) + `.seq` skeleton →
+`SequenceTiming.from_pulseq` → design within hardware → MC-validate
+(`to_sim_waveform`) → `to_pulseq`.  NB at present `from_btensor_waveform` assumes
+the 180 at TE/2, so only symmetric-echo designs round-trip through the pedagogy
+path; asymmetric designs need the builder to un-fold at the design's `echo_idx`.
 
 NB: the small (3×3) b-tensor contraction must be an explicit outer-product sum,
 not `einsum`/matmul — the matmul triggers an XLA "too small divisible part of the
