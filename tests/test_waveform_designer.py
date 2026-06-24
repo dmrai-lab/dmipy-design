@@ -248,3 +248,20 @@ def test_design_with_timing_respects_windows():
     off = ((t < st.t_lead) | (np.abs(t - TE / 2) <= st.t_refocus / 2)
            | (t > TE - st.t_readout_pre_echo))
     assert gnorm[off].max() <= G_MAX * 0.02, "gradient leaks into an off-region"
+
+
+def test_offcenter_180_is_guarded():
+    """An off-centre 180 (misaligned with the readout — static field would refocus
+    at 2·t_180, not TE) must RAISE unless explicitly opted into.  TE/2 is silent."""
+    from dmipy_sim.sequences import Sequence
+    n_t, dt = 200, 3e-4
+    eff = np.zeros((n_t, 3), dtype=np.float32)
+    eff[10:60, 0] = 0.03
+    eff[110:170, 0] = -0.03
+    i_off = int(round(0.35 * (n_t - 1)))
+    with pytest.raises(ValueError, match="off-centre|TE/2|misaligned"):
+        Sequence.from_btensor_waveform(eff, dt, echo_idx=i_off)
+    # deliberate opt-in is allowed; TE/2 (default + explicit) is fine
+    Sequence.from_btensor_waveform(eff, dt, echo_idx=i_off, allow_offcenter_180=True)
+    Sequence.from_btensor_waveform(eff, dt)
+    Sequence.from_btensor_waveform(eff, dt, echo_idx=n_t // 2)
