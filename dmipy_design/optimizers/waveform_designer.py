@@ -89,7 +89,7 @@ GAMMA = 267.513e6  # rad/s/T — matches dmipy_sim.constants.GAMMA
 
 # Fixed constraint order; the AL uses a flag-selected subset, the report shows all.
 CONSTRAINT_NAMES = ('refocus', 'shape', 'g(TE)=0', 'RF-window', 'slew',
-                    'M1', 'M2', 'maxwell', 'spectral')
+                    'M1', 'M2', 'maxwell', 'spectral', 'pns')
 _BASE_CONSTRAINTS = (0, 1, 2, 3, 4)   # always active (validity)
 
 
@@ -264,13 +264,21 @@ def _shape_penalty(B, b_delta):
 # Parameterization + full constraint vector
 # ===========================================================================
 
-def _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask):
-    """raw (n_t,3) -> slew- and amplitude-bounded, RF-gated physical g (n_t,3)."""
+def _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask, null_180_mask=None):
+    """raw (n_t,3) -> slew- and amplitude-bounded, RF-gated physical g (n_t,3).
+
+    ``null_180_mask`` (n_t,1; 0 in the central 180 window, 1 elsewhere) AMPLITUDE-nulls g
+    in the 180 window only -- so g is structurally 0 during the 180 (deliverable, exact
+    b/q, no clip on export) WITHOUT touching the lead-in/readout (those are ~0 already via
+    g(0)=0 / g(TE)=0, and nulling them would create big edge steps that suppress the main
+    lobes -- a ~6x b loss).  g was already held <=~2% in the window, so the step from that
+    to 0 is tiny and slew-harmless on the raster."""
     rn = jnp.sqrt(jnp.sum(raw ** 2, axis=1, keepdims=True) + 1e-12)
     slew = s_max * (jnp.tanh(rn) / rn) * raw * slew_off_mask            # |slew|<=S_max
     g_raw = dt * jnp.cumsum(slew, axis=0)                              # g(0)=0
     gn = jnp.sqrt(jnp.sum(g_raw ** 2, axis=1, keepdims=True) + 1e-12)
-    return g_max * (jnp.tanh(gn / g_max) / gn) * g_raw                 # |g|<=G_max
+    g = g_max * (jnp.tanh(gn / g_max) / gn) * g_raw                    # |g|<=G_max
+    return g if null_180_mask is None else g * null_180_mask           # null the 180 window
 
 
 def _rms_frequency(g, q):
@@ -283,8 +291,52 @@ def _rms_frequency(g, q):
     return jnp.sqrt(w2) / (2.0 * jnp.pi)
 
 
+# SAFE PNS coefficients (Hebrank/Szczepankiewicz model) -- pypulseq's representative
+# Siemens-class example (safe_example_hw / MP_GPA_EXAMPLE).  Per axis: tau1/2/3 (ms),
+# a1/2/3, stim_limit, g_scale.  NOT the exact Prisma .asc (vendor-confidential); the
+# in-design constraint shapes the waveform, and pulseq_pns_report verifies on export.
+_SAFE_HW = (
+    dict(tau1=0.2, tau2=0.03, tau3=3.0, a1=0.4, a2=0.1, a3=0.5, stim_limit=30.0, g_scale=0.35),
+    dict(tau1=1.5, tau2=2.5, tau3=0.15, a1=0.55, a2=0.15, a3=0.3, stim_limit=15.0, g_scale=0.31),
+    dict(tau1=2.0, tau2=0.12, tau3=1.0, a1=0.42, a2=0.4, a3=0.18, stim_limit=25.0, g_scale=0.25),
+)
+
+
+def safe_lowpass_kernels(dt_ms, m):
+    """(9, m) causal RC-lowpass kernels (3 axes x 3 taus) for the SAFE model: kernel_i =
+    alpha*(1-alpha)^arange(m), alpha=dt/(tau+dt).  Convolving dG/dt with these reproduces
+    ``safe_tau_lowpass``.  Precomputed once (static) and matmul/convolved in the optimizer."""
+    kers = []
+    for hw in _SAFE_HW:
+        for tau in (hw['tau1'], hw['tau2'], hw['tau3']):
+            alpha = dt_ms / (tau + dt_ms)
+            kers.append(alpha * (1.0 - alpha) ** np.arange(m))
+    return np.asarray(kers)                                # (9, m)
+
+
+def _safe_pns_pct(g, dt, kernels):
+    """Differentiable SAFE PNS (% of stimulation limit) of a gradient g (n_t,3 T/m): the
+    SAME model as pypulseq's seq.calculate_pns -- 3 RC-lowpass terms per axis, normalized,
+    L2-combined across axes, max over time.  ``kernels`` (9,m) from safe_lowpass_kernels."""
+    dgdt = jnp.diff(g, axis=0) / dt                        # (m,3) T/m/s
+    m = dgdt.shape[0]
+    pns_sq = jnp.zeros(m)
+    for ax in range(3):
+        hw = _SAFE_HW[ax]
+        d = dgdt[:, ax]
+        k = 3 * ax
+        lp1 = jnp.convolve(d, kernels[k + 0])[:m]
+        lp2 = jnp.convolve(jnp.abs(d), kernels[k + 1])[:m]
+        lp3 = jnp.convolve(d, kernels[k + 2])[:m]
+        stim = hw['a1'] * jnp.abs(lp1) + hw['a2'] * lp2 + hw['a3'] * jnp.abs(lp3)
+        pns_ax = stim / hw['stim_limit'] * hw['g_scale'] * 100.0
+        pns_sq = pns_sq + pns_ax ** 2
+    return jnp.sqrt(jnp.max(pns_sq))                       # max_t L2-across-axes, %
+
+
 def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
-                       slew_off_mask, t_arr, TE, f_target=0.0):
+                       slew_off_mask, t_arr, TE, f_target=0.0,
+                       pns_kernels=None, pns_target=80.0, null_180_mask=None):
     """Return (b, c) where c is the full (9,) vector of equality violations.
 
     Each entry is a normalized squared violation (0 = satisfied); the AL selects
@@ -292,7 +344,7 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
     RMS encoding frequency (spectral content) when the spectral constraint is
     active; 0 leaves that entry inert.
     """
-    g = _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask)
+    g = _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask, null_180_mask)
     B = b_tensor(g, dt, echo_idx)
     b = b_value(B)
     s = _echo_sign(g.shape[0], echo_idx)                  # (n_t,1)
@@ -310,6 +362,12 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
     f_rms = _rms_frequency(g, q)
     c_spec = jnp.where(f_target > 0.0,
                        (f_rms - f_target) ** 2 / (f_target ** 2 + 1e-30), 0.0)
+    # PNS (SAFE): one-sided -- 0 when predicted PNS <= target % of the limit, else the
+    # normalized overshoot (driven down by the AL).  Computed only when active.
+    if pns_kernels is not None:
+        c_pns = jnp.maximum(_safe_pns_pct(g, dt, pns_kernels) / pns_target - 1.0, 0.0)
+    else:
+        c_pns = 0.0
 
     c = jnp.array([
         jnp.sum(q[-1] ** 2) / (jnp.max(q2) + 1e-30),                  # 0 refocus (M0)
@@ -321,6 +379,7 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
         jnp.sum(M2 ** 2) / (g_max * TE ** 3) ** 2,                   # 6 M2 (accel)
         jnp.sum(Mmx ** 2) / (g_max ** 2 * TE) ** 2,                  # 7 Maxwell
         c_spec,                                                      # 8 spectral (f_rms→f)
+        c_pns,                                                       # 9 PNS (SAFE <= target)
     ])
     return b, c
 
@@ -387,6 +446,8 @@ def design_waveform(
     null_M2: bool = True,
     maxwell: bool = True,
     spectral_freq: float = None,
+    pns: bool = False,
+    pns_target: float = 80.0,
     n_restarts: int = 48,
     seed: int = 0,
     inner_maxiter: int = 300,
@@ -450,9 +511,24 @@ def design_waveform(
     rf_mask = jnp.asarray(rf_mask_np)
     slew_off_mask = jnp.asarray(1.0 - rf_mask_np)[:, None]
     t_arr = jnp.asarray(t)
+    # amplitude-null ONLY the central 180 window (the off-region containing the echo): g is
+    # then exactly 0 during the 180 -> deliverable + exact b/q, no export clip.  Lead-in /
+    # readout are NOT nulled (they are ~0 already via g(0)=0 / g(TE)=0 and host the lobe
+    # ramps; nulling them creates big edge steps that collapse b).
+    null_180_np = np.ones(n_t)
+    if rf_mask_np[echo_idx] > 0.5:
+        lo180 = hi180 = echo_idx
+        while lo180 > 0 and rf_mask_np[lo180 - 1] > 0.5:
+            lo180 -= 1
+        while hi180 < n_t - 1 and rf_mask_np[hi180 + 1] > 0.5:
+            hi180 += 1
+        null_180_np[lo180:hi180 + 1] = 0.0
+    null_180_mask = jnp.asarray(null_180_np)[:, None]
     b_scale = (GAMMA * G_max) ** 2 * TE ** 3 / 50.0       # ~ achievable LTE b
+    # SAFE PNS lowpass kernels (static) -- only built/used when pns=True (constraint #9)
+    pns_kernels = jnp.asarray(safe_lowpass_kernels(dt * 1e3, n_t - 1)) if pns else None
 
-    # active constraint subset (validity always on; flags add M1/M2/Maxwell/spectral)
+    # active constraint subset (validity always on; flags add M1/M2/Maxwell/spectral/PNS)
     f_target = float(spectral_freq) if spectral_freq else 0.0
     active = list(_BASE_CONSTRAINTS)
     if null_M1:
@@ -463,6 +539,8 @@ def design_waveform(
         active.append(7)
     if f_target > 0.0:
         active.append(8)
+    if pns:
+        active.append(9)
     active_idx = jnp.asarray(active)
     active_names = tuple(CONSTRAINT_NAMES[i] for i in active)
     n_active = len(active)
@@ -480,7 +558,7 @@ def design_waveform(
 
     bc = lambda r: _b_and_constraints(r, dt, echo_idx, slew_rate_max, G_max,
                                       b_delta, rf_mask, slew_off_mask, t_arr, TE,
-                                      f_target)
+                                      f_target, pns_kernels, pns_target, null_180_mask)
 
     # --- augmented Lagrangian, per-restart multipliers, vmapped on GPU ---
     # The loss + LBFGS solver are built ONCE (μ, λ flow in as traced args) and the whole
@@ -517,27 +595,28 @@ def design_waveform(
 
     # --- evaluate all metrics, pick best feasible (max b) ---
     def _metrics(r):
-        g = _waveform_from_raw(r, dt, slew_rate_max, G_max, slew_off_mask)
+        g = _waveform_from_raw(r, dt, slew_rate_max, G_max, slew_off_mask, null_180_mask)
         B = b_tensor(g, dt, echo_idx)
         q = effective_q(g, dt, echo_idx)
         gnorm = jnp.sqrt(jnp.sum(g ** 2, axis=1) + 1e-30)
         slew = jnp.sqrt(jnp.sum((jnp.diff(g, axis=0) / dt) ** 2, axis=1) + 1e-30)
         refoc = jnp.sqrt(jnp.sum(q[-1] ** 2)) / (jnp.sqrt(jnp.max(jnp.sum(q ** 2, axis=1))) + 1e-30)
         _, c_all = bc(r)
+        pns_pct = _safe_pns_pct(g, dt, pns_kernels) if pns_kernels is not None else 0.0
         return jnp.array([b_value(B), b_delta_of(B), jnp.max(gnorm), jnp.max(slew),
                           refoc, jnp.max(gnorm * rf_mask),
                           jnp.sqrt(c_all[5]), jnp.sqrt(c_all[6]), jnp.sqrt(c_all[7]),
-                          _rms_frequency(g, q)]), g
+                          _rms_frequency(g, q), pns_pct]), g
 
     metrics, gs = jax.vmap(_metrics)(raw)
     metrics = np.asarray(metrics)
     gs = np.asarray(gs)
     (b_all, bd_all, amp_all, slew_all, refoc_all, win_all,
-     m1_all, m2_all, mx_all, frms_all) = metrics.T
+     m1_all, m2_all, mx_all, frms_all, pns_all) = metrics.T
 
     feas = ((np.abs(bd_all - b_delta) < 2e-2) & (amp_all <= G_max * 1.01)
             & (slew_all <= slew_rate_max * 1.02) & (refoc_all < 1e-2)
-            & (win_all <= G_max * 0.02))
+            & (win_all <= G_max * 0.02))   # g is amplitude-nulled in off-regions -> ~0
     if null_M1:
         feas &= (m1_all < 5e-2)
     if null_M2:
@@ -546,6 +625,8 @@ def design_waveform(
         feas &= (mx_all < 5e-2)
     if f_target > 0.0:
         feas &= (np.abs(frms_all - f_target) / f_target < 0.15)   # RMS freq near target
+    if pns:
+        feas &= (pns_all <= pns_target * 1.02)                    # SAFE PNS within target
 
     if feas.any():
         cand = np.where(feas)[0]
@@ -558,7 +639,8 @@ def design_waveform(
                 + refoc_all + win_all / G_max
                 + (m1_all if null_M1 else 0) + (m2_all if null_M2 else 0)
                 + (mx_all if maxwell else 0)
-                + (np.abs(frms_all - f_target) / f_target if f_target > 0 else 0))
+                + (np.abs(frms_all - f_target) / f_target if f_target > 0 else 0)
+                + (np.maximum(pns_all / pns_target - 1.0, 0) if pns else 0))
         best = int(np.argmin(viol))
         feasible = False
 
@@ -576,6 +658,7 @@ def design_waveform(
         active_constraints=active_names, feasible=bool(feasible),
         report={'n_restarts': n_restarts, 'n_feasible': int(feas.sum()),
                 'b_scale': float(b_scale), 'dt': dt,
+                'pns_pct': float(pns_all[best]), 'pns_target': float(pns_target),
                 'b_feasible_max': float(b_all[feas].max()) if feas.any() else None},
     )
 

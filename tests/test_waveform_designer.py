@@ -267,6 +267,23 @@ def test_min_te_for_b_returns_smallest_feasible_te():
     assert 0.038 <= te <= 0.080                               # min TE within the bracket
 
 
+def test_pns_constraint_holds_predicted_pns_at_target():
+    """Constraint #9 (differentiable SAFE PNS): pns=True drives the predicted PNS to the
+    target % of the stimulation limit, so the design is PNS-aware by construction (an
+    UNCONSTRAINED 200 T/m/s design exceeds the limit -- PNS, not peak slew, binds).  The
+    in-design SAFE is on the coarse design grid and reads below the fine-raster export
+    SAFE, so verify-on-export (pulseq_pns_report) remains authoritative."""
+    st = SequenceTiming(t_excite=3e-3, t_refocus=6e-3, t_readout_pre_echo=14e-3)
+    d = design_waveform(1.0, G_max=G_MAX, slew_rate_max=200.0, TE=0.060, timing=st,
+                        n_t=180, n_restarts=24, n_outer=14, null_M1=False, null_M2=False,
+                        maxwell=False, pns=True, pns_target=80.0, seed=0)
+    assert 'pns' in d.active_constraints                      # constraint #9 active
+    # the constraint pulls predicted PNS toward the target (unconstrained ~120-160%);
+    # bound loosely -- exact convergence varies at modest settings, and verify-on-export
+    # (pulseq_pns_report) is authoritative for the real (fine-raster) value.
+    assert d.report['pns_pct'] <= 80.0 * 1.25                 # PNS brought near/under target
+
+
 def test_design_with_timing_respects_windows():
     """design_waveform(timing=...) optimizes only within the derived encoding
     windows: feasible, and the gradient is ~0 in the lead-in / 180 / readout
