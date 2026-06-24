@@ -578,3 +578,65 @@ def design_waveform(
                 'b_scale': float(b_scale), 'dt': dt,
                 'b_feasible_max': float(b_all[feas].max()) if feas.any() else None},
     )
+
+
+def min_te_for_b(b_target, b_delta, *, timing=None, te_lo=None, te_hi=None,
+                 te_max=0.25, tol_te=1e-3, verbose=False, **design_kwargs):
+    """Smallest TE whose max-b design reaches ``b_target`` -- the first-class
+    min-TE-at-given-b mode.
+
+    ``design_waveform`` only maximizes b at a FIXED TE.  Because the achievable b is
+    monotonically increasing in TE, the minimum TE that reaches a target b is found by
+    BISECTING TE around that max-b primitive -- which is exactly what this does (no
+    hand-rolled scan).  Each bracket/bisection step is one ``design_waveform`` call (= one
+    JIT compile); a batched-TE-in-one-compile version is the natural future speed-up.
+
+    Parameters
+    ----------
+    b_target : float -- required b-value (s/m^2).
+    b_delta : float -- target b-tensor shape, passed straight to ``design_waveform``.
+    timing : SequenceTiming or None -- the timing budget; its ``min_TE()`` is the hard
+        lower floor for the bracket.
+    te_lo, te_hi : float or None -- optional TE bracket (s).  Defaults: ``te_lo`` = the
+        timing floor (else 1 ms); ``te_hi`` is grown x1.5 until b_target is reached.
+    te_max : float -- cap (s) for the upward search; raises if b_target is unreachable.
+    tol_te : float -- stop when the TE bracket is narrower than this (s).
+    **design_kwargs -- forwarded to ``design_waveform`` (G_max, slew_rate_max, n_t,
+        n_restarts, n_outer, null_M1/M2/maxwell, spectral_freq, seed, ...).
+
+    Returns
+    -------
+    (design, te) : the feasible :class:`WaveformDesign` at the smallest TE reaching
+        ``b_target``, and that TE (s).
+    """
+    def reached(te):
+        d = design_waveform(b_delta, TE=te, timing=timing, **design_kwargs)
+        ok = bool(d.feasible) and (d.b_value >= b_target)
+        if verbose:
+            print(f"  min_te_for_b: TE={te*1e3:6.2f}ms  b={d.b_value/1e6:7.0f}  "
+                  f"feasible={d.feasible}  -> {'reaches' if ok else 'short'}")
+        return ok, d
+
+    floor = timing.min_TE() if timing is not None else 1e-3
+    lo = max(float(te_lo) if te_lo is not None else floor, floor)
+    ok_lo, d_lo = reached(lo)
+    if ok_lo:
+        return d_lo, lo                                   # floor already reaches it
+    hi = float(te_hi) if te_hi is not None else lo * 1.6
+    ok_hi, d_hi = reached(hi)
+    while not ok_hi:                                      # grow the upper bracket
+        if hi > te_max:
+            raise ValueError(
+                f"b_target={b_target/1e6:.0f} s/mm^2 not reached below te_max="
+                f"{te_max*1e3:.0f} ms (best b={d_hi.b_value/1e6:.0f}).")
+        hi *= 1.5
+        ok_hi, d_hi = reached(hi)
+    best_d = d_hi                                         # invariant: lo short, hi reaches
+    while hi - lo > tol_te:
+        mid = 0.5 * (lo + hi)
+        ok_mid, d_mid = reached(mid)
+        if ok_mid:
+            hi, best_d = mid, d_mid
+        else:
+            lo = mid
+    return best_d, hi

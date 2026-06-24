@@ -252,6 +252,21 @@ def test_sequence_timing_min_te_guard():
         st.masks(st.min_TE() - 1e-3, 200)
 
 
+def test_min_te_for_b_returns_smallest_feasible_te():
+    """min_te_for_b bisects the max-b primitive and returns a FEASIBLE design that
+    reaches the target b at a TE inside the search bracket (the minimum such TE).
+    Uses the same restart/outer budget as the validated timing test so the designs
+    are genuinely feasible (too-coarse settings give huge-b-but-infeasible designs,
+    which the helper correctly rejects)."""
+    from dmipy_design.optimizers import min_te_for_b
+    kw = dict(G_max=G_MAX, slew_rate_max=S_MAX, n_t=150, n_restarts=16, n_outer=10,
+              null_M1=False, null_M2=False, maxwell=False)
+    b_target = 3.0e9                                          # 3000 s/mm^2 (well below max)
+    d, te = min_te_for_b(b_target, 1.0, te_lo=0.038, te_hi=0.080, tol_te=7e-3, **kw)
+    assert d.feasible and d.b_value >= b_target               # reaches the target, feasibly
+    assert 0.038 <= te <= 0.080                               # min TE within the bracket
+
+
 def test_design_with_timing_respects_windows():
     """design_waveform(timing=...) optimizes only within the derived encoding
     windows: feasible, and the gradient is ~0 in the lead-in / 180 / readout
