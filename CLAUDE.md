@@ -180,6 +180,16 @@ any target b-tensor shape (`b_delta`: 1 LTE, 0 STE, -0.5 PTE) while maximizing b
 under Prisma hardware (G_max=0.08, slew=200, TE).  Use `design.to_sim_waveform()`
 to hand the real gradient to the dmipy-sim MC forward / mc_bridge.
 
+**Toggleable constraints** (the full NOW objective set) — `null_M1` (velocity:
+∫t·g_eff=0), `null_M2` (acceleration: ∫t²·g_eff=0), `maxwell` (concomitant:
+∫s·g·gᵀ=0, Szczepankiewicz 2019).  Each flag adds its term to the AL; *all*
+indices (`m1_index`, `m2_index`, `maxwell_index`) are always reported regardless,
+so toggling shows what changed and the b-cost.  On an asymmetric echo (frac≠0.5,
+where these are naturally non-zero) the trade-off is stark: LTE baseline
+b≈18800 s/mm² (M1≈0.25) → `null_M1` nulls M1 to <0.01 but costs ~4× b (≈4300,
+the classic flow-comp penalty); `maxwell` nulls it cheaply (~15% b); all three
+together cost the most.
+
 Solver: JAX augmented Lagrangian (slew + amplitude are structural via radial
 tanh; refocus/shape/endpoints are equality constraints with multipliers), inner
 jaxopt L-BFGS, vmapped multi-restart on GPU.  **Use the AL — do not revert to

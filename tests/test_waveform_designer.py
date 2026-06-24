@@ -142,3 +142,43 @@ def test_tier3_ste_orientation_invariance(designs):
     assert cv['LTE'] > 0.10, f"LTE should be orientation-dependent: CV={cv['LTE']:.3f}"
     assert cv['STE'] < cv['LTE'] / 3.0, (
         f"STE CV ({cv['STE']:.3f}) must be far below LTE CV ({cv['LTE']:.3f})")
+
+
+# ---------------------------------------------------------------------------
+# Constraint toggling — M1/M2 moment nulling + Maxwell (concomitant) compensation
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def toggle_designs():
+    """Baseline vs fully-constrained LTE on an ASYMMETRIC echo (frac=0.4), where
+    M1 / Maxwell are naturally non-zero so the constraints have visible work to do."""
+    kw = dict(b_delta=1.0, G_max=G_MAX, slew_rate_max=S_MAX, TE=TE, n_t=120,
+              echo_frac=0.40, n_restarts=24, n_outer=12)
+    return {
+        'base': design_waveform(**kw),
+        'all': design_waveform(**kw, null_M1=True, null_M2=True, maxwell=True),
+    }
+
+
+def test_constraint_flags_select_active_set():
+    """Flags toggle exactly which constraints enter the augmented Lagrangian."""
+    d = design_waveform(0.0, TE=TE, n_t=64, n_restarts=4, n_outer=3,
+                        inner_maxiter=40, null_M1=True, maxwell=True)
+    assert 'M1' in d.active_constraints and 'maxwell' in d.active_constraints
+    assert 'M2' not in d.active_constraints
+    # all indices reported regardless of which are constrained
+    assert d.m1_index is not None and d.m2_index is not None and d.maxwell_index is not None
+
+
+def test_moment_and_maxwell_nulling(toggle_designs):
+    """Activating M1/M2/Maxwell drives each index toward zero — and costs b."""
+    base, allc = toggle_designs['base'], toggle_designs['all']
+    # asymmetric baseline is genuinely uncompensated (sanity: there is work to do)
+    assert base.m1_index > 0.10, f"baseline M1 should be non-zero: {base.m1_index}"
+    assert base.maxwell_index > 0.10, f"baseline Maxwell should be non-zero: {base.maxwell_index}"
+    # the constrained design nulls all three indices
+    assert allc.m1_index < 0.06 and allc.m1_index < base.m1_index / 3
+    assert allc.m2_index < 0.06 and allc.m2_index < base.m2_index / 3
+    assert allc.maxwell_index < 0.06 and allc.maxwell_index < base.maxwell_index / 3
+    # compensation is not free: b decreases relative to the unconstrained optimum
+    assert allc.b_value < base.b_value, "expected a b-cost for the added constraints"
