@@ -139,6 +139,10 @@ class SequenceTiming:
     t_readout_pre_echo: float        # readout start → echo; post-180 encode ends by TE−this
     t_prep: float = 0.0              # optional fat-sat/prep before encoding
     TE: float | None = None          # native echo time (e.g. read from a .seq); masks() default
+    symmetric: bool = False          # VANILLA mode: mirror the pre/post-180 windows about the
+    #                                  echo (equal durations), dead-timing the surplus of the
+    #                                  longer window.  See masks() — this is the conventional
+    #                                  "symmetric" waveform you reach by REFUSING the asymmetry.
 
     @property
     def t_lead(self) -> float:
@@ -156,6 +160,13 @@ class SequenceTiming:
         ``slew_off_mask`` is 1 in the two encoding windows and 0 in the off-regions
         (excitation lead-in, the 180, the readout tail), so the optimizer's gradient
         lives only where the hardware allows it.  The 180 (echo_idx) is at TE/2.
+
+        ``symmetric`` (VANILLA mode): the inner edges are already ±t_refocus/2 from the
+        echo, so a symmetric (mirror about the echo) encoding requires equal OUTER
+        extents — both windows reach ``W = min(pre_dur, post_dur)`` out from the 180.
+        The surplus of whichever real window was longer is forced to 0 → it becomes
+        dead time the spins spend transverse (extra T2 loss).  This is the conventional
+        symmetric waveform: the cost of REFUSING the budget's natural asymmetry.
         """
         TE = float(TE if TE is not None else self.TE)
         if TE < self.min_TE() - 1e-9:
@@ -169,6 +180,12 @@ class SequenceTiming:
         on[t < self.t_lead] = 0.0                                   # excitation lead-in
         on[np.abs(t - echo) <= self.t_refocus / 2.0] = 0.0          # 180 (+crusher)
         on[t > TE - self.t_readout_pre_echo] = 0.0                  # readout tail
+        if self.symmetric:
+            pre_dur = (echo - self.t_refocus / 2.0) - self.t_lead
+            post_dur = (TE - self.t_readout_pre_echo) - (echo + self.t_refocus / 2.0)
+            W = max(0.0, min(pre_dur, post_dur))                    # mirror extent from 180
+            on[t < echo - self.t_refocus / 2.0 - W] = 0.0           # dead-time the longer side
+            on[t > echo + self.t_refocus / 2.0 + W] = 0.0
         return on[:, None], int(round(echo / dt))
 
     @classmethod
@@ -466,23 +483,37 @@ def design_waveform(
                                       f_target)
 
     # --- augmented Lagrangian, per-restart multipliers, vmapped on GPU ---
-    lam = jnp.zeros((n_restarts, n_active))
-    mu = 10.0
-    for outer in range(n_outer):
-        def al_loss(r, lam_r, mu_s):
-            b, c_all = bc(r)
-            c = c_all[active_idx]
-            return -b / b_scale + jnp.sum(lam_r * c) + 0.5 * mu_s * jnp.sum(c ** 2)
+    # The loss + LBFGS solver are built ONCE (μ, λ flow in as traced args) and the whole
+    # outer loop runs inside a single jitted lax.scan, so the vmapped LBFGS graph compiles
+    # ONE time.  (The previous version re-`def`-ed al_loss and re-constructed LBFGS inside
+    # a Python `for` loop; each fresh closure is a jit-cache miss, so the expensive
+    # vmapped-LBFGS graph was XLA-recompiled ~n_outer times -- that recompilation, not the
+    # arithmetic, dominated the wall clock for this small problem.)
+    def al_loss(r, lam_r, mu_s):
+        b, c_all = bc(r)
+        c = c_all[active_idx]
+        return -b / b_scale + jnp.sum(lam_r * c) + 0.5 * mu_s * jnp.sum(c ** 2)
 
-        solver = LBFGS(fun=al_loss, maxiter=inner_maxiter, tol=1e-8,
-                       jit=True, history_size=10)
-        raw = jax.vmap(lambda r, l: solver.run(r, l, mu).params)(raw, lam)
-        cs = jax.vmap(lambda r: bc(r)[1][active_idx])(raw)
-        lam = lam + mu * cs
-        mu = min(mu * 4.0, 1e6)
-        if verbose:
-            print(f"  outer {outer}: mu={mu:.0e}  max|c| best="
-                  f"{float(jnp.min(jnp.max(cs, axis=1))):.2e}")
+    solver = LBFGS(fun=al_loss, maxiter=inner_maxiter, tol=1e-8,
+                   jit=True, history_size=10)
+
+    def _outer_step(carry, _):
+        raw_c, lam_c, mu_c = carry
+        raw_n = jax.vmap(lambda r, l: solver.run(r, l, mu_c).params)(raw_c, lam_c)
+        cs = jax.vmap(lambda r: bc(r)[1][active_idx])(raw_n)
+        lam_n = lam_c + mu_c * cs
+        mu_n = jnp.minimum(mu_c * 4.0, 1e6)
+        return (raw_n, lam_n, mu_n), jnp.min(jnp.max(cs, axis=1))
+
+    @jax.jit
+    def _run_al(raw0, lam0):
+        return jax.lax.scan(_outer_step, (raw0, lam0, jnp.float32(10.0)),
+                            None, length=n_outer)
+
+    (raw, lam, mu), maxc_hist = _run_al(raw, jnp.zeros((n_restarts, n_active)))
+    if verbose:
+        for outer, h in enumerate(np.asarray(maxc_hist)):
+            print(f"  outer {outer}: max|c| best={float(h):.2e}")
 
     # --- evaluate all metrics, pick best feasible (max b) ---
     def _metrics(r):

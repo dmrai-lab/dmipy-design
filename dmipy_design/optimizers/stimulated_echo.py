@@ -41,10 +41,17 @@ Status (groundwork)
   validated ``design_waveform`` core (duck-typed ``timing``).  It produces the
   *effective encoding* (q, b-tensor, shape, hardware, optional M1/M2/Maxwell/
   spectral all work identically).
-* NOT yet done (deliberate, the build-out): GPU validation of the produced PGSTE
-  encodings, and a dmipy-sim ``from_pgste_waveform`` *playback* builder that lays
-  the designed lobes into a real 3×90 stimulated echo (dmipy-sim already has
-  ``from_pgste`` + the stimulated-echo Bloch engine to extend).
+* ``pgste_store_recall_idx`` — the design→sim handoff: the store/recall sample
+  indices the dmipy-sim playback builder needs (the τ₁ end and τ₃ start).
+* PLAYBACK (landed): dmipy-sim ``Sequence.from_pgste_waveform(effective_G, dt,
+  store_idx=, recall_idx=)`` lays the designed effective gradient into a real 3×90
+  stimulated echo — it reuses the existing ``_build_pgste`` Bloch lowering unchanged
+  (un-fold about the recall, 3×90 at [0, store, recall], TM spoiler + emergent-½
+  macro-crusher) by deriving ``delta=store_idx·dt`` / ``TM=(recall−store)·dt``.  The
+  spin-echo ``from_btensor_waveform`` still — correctly — refuses a PGSTE via its
+  off-centre-180 guard.
+* NOT yet done (deliberate): GPU validation of the produced PGSTE encodings (the
+  full Bloch replay of a designed PGSTE on a restricted substrate).
 """
 
 from __future__ import annotations
@@ -154,3 +161,29 @@ def design_stimulated_echo(b_delta, *, TM, TE, t_excite=2e-3,
     timing = StimulatedEchoTiming(t_excite=t_excite, TM=TM, t_store=t_store,
                                   t_recall=t_recall, t_prep=t_prep, TE=TE)
     return design_waveform(b_delta, timing=timing, TE=TE, **design_kwargs)
+
+
+def pgste_store_recall_idx(timing, TE, n_t):
+    """Return ``(store_idx, recall_idx)`` for the dmipy-sim PGSTE playback builder.
+
+    The design→sim handoff: ``store_idx`` is the τ₁ end (the store 90) and
+    ``recall_idx`` the τ₃ start (the recall 90) on the same ``n_t``/``TE`` grid the
+    design was solved on.  Feed the design's effective gradient plus these to
+    ``dmipy_sim Sequence.from_pgste_waveform(effective_G, dt, store_idx=…,
+    recall_idx=…)`` to play the designed encoding as a real 3×90 stimulated echo::
+
+        d = design_stimulated_echo(b_delta=1.0, TM=..., TE=..., n_t=...)
+        si, ri = pgste_store_recall_idx(d_timing, TE, n_t)   # d_timing as built below
+        seq = Sequence.from_pgste_waveform(d.effective_G(), d.dt,
+                                           store_idx=si, recall_idx=ri)
+
+    ``store_idx``/``recall_idx`` come straight from ``StimulatedEchoTiming.masks``
+    (the τ₁ end and τ₃ start), so they bracket the gradient-off middle where the
+    sign flip lives — the builder un-folds the τ₃ lobe about the recall.
+    """
+    TE = float(TE)
+    dt = TE / (n_t - 1)
+    tau = timing.tau(TE)
+    tau1_end = timing.t_lead + tau
+    tau3_start = tau1_end + timing._dead_middle
+    return int(round(tau1_end / dt)), int(round(tau3_start / dt))
