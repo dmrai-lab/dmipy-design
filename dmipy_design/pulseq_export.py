@@ -167,6 +167,28 @@ def seq_btensor(seq, *, gamma_hz=GAMMA_HZ, n=8000):
     return (q[:, :, None] * q[:, None, :]).sum(0) * dt
 
 
+def pulseq_pns_report(seq, *, hardware=None, time_range=None):
+    """Tier-3 PNS prediction via the SAFE model -- the SAME model the scanner uses to
+    accept/reject a sequence (Hebrank/Schulte; IEC 60601-2-33).
+
+    Runs ``seq.calculate_pns`` on the assembled .seq.  ``hardware`` is a SAFE coefficient
+    namespace; default is pypulseq's representative Siemens-class example
+    (``safe_example_hw``) -- NOT the exact Prisma .asc (which is vendor-confidential), so
+    read the % as indicative, not certified.  Returns max PNS as % of the stimulation
+    limit (100% = limit; clinical normal mode ~80%) and the per-axis breakdown.
+    """
+    from pypulseq.utils.safe_pns_prediction import safe_example_hw
+    hw = hardware if hardware is not None else safe_example_hw()
+    res = seq.calculate_pns(hw, time_range=time_range, do_plots=False)
+    ok = bool(res[0])
+    pns_norm = np.asarray(res[1], dtype=float)            # total, normalized to the limit
+    comp = np.asarray(res[2], dtype=float) if len(res) > 2 else None   # per-axis (n,3)
+    per_axis = (np.max(np.abs(comp), axis=0) * 100.0).tolist() if comp is not None \
+        and comp.ndim == 2 and comp.shape[1] == 3 else None
+    return dict(pns_ok=ok, pns_max_pct=float(np.max(pns_norm)) * 100.0,
+                pns_per_axis_pct=per_axis, hardware=getattr(hw, 'name', 'custom'))
+
+
 def pulseq_delivery_report(design, seq, *, scanner='siemens_prisma'):
     """Run the offline acceptance checks: timing, realized peak Gmax/slew vs the system
     limits, and the b-tensor round-trip (assembled .seq vs design)."""

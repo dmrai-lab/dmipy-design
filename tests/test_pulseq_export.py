@@ -7,7 +7,8 @@ import pytest
 pytest.importorskip("pypulseq")
 
 from dmipy_design.optimizers import design_waveform, SequenceTiming
-from dmipy_design.pulseq_export import design_to_pulseq, pulseq_delivery_report
+from dmipy_design.pulseq_export import (
+    design_to_pulseq, pulseq_delivery_report, pulseq_pns_report)
 
 
 def test_design_exports_to_runnable_prisma_spin_echo(tmp_path):
@@ -30,3 +31,10 @@ def test_design_exports_to_runnable_prisma_spin_echo(tmp_path):
     assert rep['grad_ok'], (rep['max_grad_mT'], rep['limit_grad_mT'])
     assert rep['slew_ok'], (rep['max_slew'], rep['limit_slew'])
     assert rep['b_rel_err'] < 0.05, rep                       # b round-trips: ask == encode
+
+    # Tier-3: SAFE PNS prediction runs and returns a normalized % per axis. (We assert the
+    # report structure, NOT pns_ok: at 200 T/m/s these designs EXCEED the PNS limit -- PNS,
+    # not peak slew, is the binding constraint, which is the point of running the check.)
+    pr = pulseq_pns_report(seq)
+    assert pr['pns_max_pct'] > 0
+    assert pr['pns_per_axis_pct'] is not None and len(pr['pns_per_axis_pct']) == 3
