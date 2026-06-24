@@ -89,8 +89,31 @@ GAMMA = 267.513e6  # rad/s/T — matches dmipy_sim.constants.GAMMA
 
 # Fixed constraint order; the AL uses a flag-selected subset, the report shows all.
 CONSTRAINT_NAMES = ('refocus', 'shape', 'g(TE)=0', 'RF-window', 'slew',
-                    'M1', 'M2', 'maxwell')
+                    'M1', 'M2', 'maxwell', 'spectral')
 _BASE_CONSTRAINTS = (0, 1, 2, 3, 4)   # always active (validity)
+
+
+def encoding_spectrum(G, dt, echo_idx):
+    """Encoding power spectrum |q̃(f)|² of a physical gradient + its summary.
+
+    The rigorous spectral-content quantity (Stepišnik): the diffusion signal is
+    ``ln S ≈ −∫ D(ω)·|q̃(ω)|² dω``, so a waveform is characterized — for ANY shape,
+    pure or broadband — by this spectrum, not by a nominal "frequency".  Returns
+    ``(freqs_Hz, power, centroid_Hz, bandwidth_Hz, rms_Hz)`` (one-sided), letting
+    you quantify and propagate the actual spectral content (and its imprecision).
+    """
+    import numpy as _np
+    G = _np.asarray(G, dtype=_np.float64)
+    s = _np.where(_np.arange(G.shape[0]) < echo_idx, 1.0, -1.0)[:, None]
+    q = GAMMA * _np.cumsum(s * G, axis=0) * dt                      # (n_t,3) rad/m
+    P = _np.sum(_np.abs(_np.fft.rfft(q, axis=0)) ** 2, axis=1)      # (nf,) power
+    f = _np.fft.rfftfreq(G.shape[0], dt)
+    Psum = P.sum() + 1e-30
+    centroid = float((f * P).sum() / Psum)
+    bandwidth = float(_np.sqrt(((f - centroid) ** 2 * P).sum() / Psum))
+    rms = float(_np.sqrt((GAMMA ** 2 * _np.sum(G ** 2)) / (_np.sum(q ** 2) + 1e-30))
+                / (2 * _np.pi))
+    return f, P, centroid, bandwidth, rms
 
 
 @dataclass
@@ -233,12 +256,24 @@ def _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask):
     return g_max * (jnp.tanh(gn / g_max) / gn) * g_raw                 # |g|<=G_max
 
 
+def _rms_frequency(g, q):
+    """RMS encoding frequency f_rms (Hz) — the FFT-free spectral-content measure.
+
+    From Stepišnik's spectral formalism: <ω²> = ∫|q'|² / ∫|q|² with q' = γ·g_eff,
+    so f_rms = sqrt(γ²·Σ|g|² / Σ|q|²)/(2π).  ~0 for PGSE (low-freq), ≈ f for an
+    OGSE at frequency f.  Differentiable and cheap (no FFT)."""
+    w2 = (GAMMA ** 2) * jnp.sum(g ** 2) / (jnp.sum(q ** 2) + 1e-30)
+    return jnp.sqrt(w2) / (2.0 * jnp.pi)
+
+
 def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
-                       slew_off_mask, t_arr, TE):
-    """Return (b, c) where c is the full (8,) vector of equality violations.
+                       slew_off_mask, t_arr, TE, f_target=0.0):
+    """Return (b, c) where c is the full (9,) vector of equality violations.
 
     Each entry is a normalized squared violation (0 = satisfied); the AL selects
-    an active subset and the report reads them all.
+    an active subset and the report reads them all.  ``f_target`` (Hz) drives the
+    RMS encoding frequency (spectral content) when the spectral constraint is
+    active; 0 leaves that entry inert.
     """
     g = _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask)
     B = b_tensor(g, dt, echo_idx)
@@ -255,6 +290,10 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
     M2 = jnp.sum((t_arr ** 2)[:, None] * geff, axis=0) * dt           # (3,)
     Mmx = dt * jnp.sum(s[:, :, None] * g[:, :, None] * g[:, None, :], axis=0)  # (3,3)
 
+    f_rms = _rms_frequency(g, q)
+    c_spec = jnp.where(f_target > 0.0,
+                       (f_rms - f_target) ** 2 / (f_target ** 2 + 1e-30), 0.0)
+
     c = jnp.array([
         jnp.sum(q[-1] ** 2) / (jnp.max(q2) + 1e-30),                  # 0 refocus (M0)
         _shape_penalty(B, b_delta),                                  # 1 shape
@@ -264,6 +303,7 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
         jnp.sum(M1 ** 2) / (g_max * TE ** 2) ** 2,                   # 5 M1 (velocity)
         jnp.sum(M2 ** 2) / (g_max * TE ** 3) ** 2,                   # 6 M2 (accel)
         jnp.sum(Mmx ** 2) / (g_max ** 2 * TE) ** 2,                  # 7 Maxwell
+        c_spec,                                                      # 8 spectral (f_rms→f)
     ])
     return b, c
 
@@ -288,6 +328,10 @@ class WaveformDesign:
     m1_index: float          # |M1| / (G_max·TE²)   — 0 when velocity-compensated
     m2_index: float          # |M2| / (G_max·TE³)   — 0 when accel-compensated
     maxwell_index: float     # ||M||_F / (G_max²·TE) — 0 when Maxwell-compensated
+    spectral_rms_hz: float   # RMS encoding frequency (≈0 PGSE-like, ≈f for OGSE)
+    spectral_centroid_hz: float   # centroid of |q̃(f)|² (one-sided)
+    spectral_bandwidth_hz: float  # rms spread of |q̃(f)|² — "how imprecise" the frequency is
+    spectral_target_hz: float     # requested spectral_freq, or None
     active_constraints: tuple
     feasible: bool
     report: dict
@@ -325,6 +369,7 @@ def design_waveform(
     null_M1: bool = True,
     null_M2: bool = True,
     maxwell: bool = True,
+    spectral_freq: float = None,
     n_restarts: int = 48,
     seed: int = 0,
     inner_maxiter: int = 300,
@@ -348,6 +393,17 @@ def design_waveform(
         fully-constrained problem is the hardest to converge; if a heavily
         constrained design comes back ``feasible=False``, raise ``n_restarts`` /
         ``n_outer``.
+    spectral_freq : float or None, default None
+        Target RMS encoding frequency (Hz) — the spectrum-paradigm OGSE knob.
+        ``None`` leaves the spectral content free (a low-frequency PGSE-like
+        waveform for ``b_delta=1``); a value adds a constraint driving the RMS
+        encoding frequency to it, yielding an oscillating (OGSE-like) waveform at
+        that frequency — for any ``b_delta`` (e.g. a frequency-dependent STE).
+        The *realized* spectrum is always reported (``spectral_rms_hz`` /
+        ``spectral_centroid_hz`` / ``spectral_bandwidth_hz``): per the spectral
+        formalism (``ln S ≈ −∫ D(ω)|q̃(ω)|² dω``) you propagate the actual encoding
+        spectrum into modelling rather than assuming a pure single frequency, so
+        the bandwidth quantifies how monochromatic the result actually is.
     n_t, echo_frac, rf_duration : see module docstring.
     n_restarts, seed, inner_maxiter, n_outer : solver controls.
 
@@ -379,7 +435,8 @@ def design_waveform(
     t_arr = jnp.asarray(t)
     b_scale = (GAMMA * G_max) ** 2 * TE ** 3 / 50.0       # ~ achievable LTE b
 
-    # active constraint subset (validity always on; flags add M1/M2/Maxwell)
+    # active constraint subset (validity always on; flags add M1/M2/Maxwell/spectral)
+    f_target = float(spectral_freq) if spectral_freq else 0.0
     active = list(_BASE_CONSTRAINTS)
     if null_M1:
         active.append(5)
@@ -387,6 +444,8 @@ def design_waveform(
         active.append(6)
     if maxwell:
         active.append(7)
+    if f_target > 0.0:
+        active.append(8)
     active_idx = jnp.asarray(active)
     active_names = tuple(CONSTRAINT_NAMES[i] for i in active)
     n_active = len(active)
@@ -403,7 +462,8 @@ def design_waveform(
            + 0.3 * jax.random.normal(kn, (n_restarts, n_t, 3)))
 
     bc = lambda r: _b_and_constraints(r, dt, echo_idx, slew_rate_max, G_max,
-                                      b_delta, rf_mask, slew_off_mask, t_arr, TE)
+                                      b_delta, rf_mask, slew_off_mask, t_arr, TE,
+                                      f_target)
 
     # --- augmented Lagrangian, per-restart multipliers, vmapped on GPU ---
     lam = jnp.zeros((n_restarts, n_active))
@@ -435,13 +495,14 @@ def design_waveform(
         _, c_all = bc(r)
         return jnp.array([b_value(B), b_delta_of(B), jnp.max(gnorm), jnp.max(slew),
                           refoc, jnp.max(gnorm * rf_mask),
-                          jnp.sqrt(c_all[5]), jnp.sqrt(c_all[6]), jnp.sqrt(c_all[7])]), g
+                          jnp.sqrt(c_all[5]), jnp.sqrt(c_all[6]), jnp.sqrt(c_all[7]),
+                          _rms_frequency(g, q)]), g
 
     metrics, gs = jax.vmap(_metrics)(raw)
     metrics = np.asarray(metrics)
     gs = np.asarray(gs)
     (b_all, bd_all, amp_all, slew_all, refoc_all, win_all,
-     m1_all, m2_all, mx_all) = metrics.T
+     m1_all, m2_all, mx_all, frms_all) = metrics.T
 
     feas = ((np.abs(bd_all - b_delta) < 2e-2) & (amp_all <= G_max * 1.01)
             & (slew_all <= slew_rate_max * 1.02) & (refoc_all < 1e-2)
@@ -452,6 +513,8 @@ def design_waveform(
         feas &= (m2_all < 5e-2)
     if maxwell:
         feas &= (mx_all < 5e-2)
+    if f_target > 0.0:
+        feas &= (np.abs(frms_all - f_target) / f_target < 0.15)   # RMS freq near target
 
     if feas.any():
         cand = np.where(feas)[0]
@@ -463,17 +526,22 @@ def design_waveform(
                 + np.maximum(slew_all - slew_rate_max, 0) / slew_rate_max
                 + refoc_all + win_all / G_max
                 + (m1_all if null_M1 else 0) + (m2_all if null_M2 else 0)
-                + (mx_all if maxwell else 0))
+                + (mx_all if maxwell else 0)
+                + (np.abs(frms_all - f_target) / f_target if f_target > 0 else 0))
         best = int(np.argmin(viol))
         feasible = False
 
+    G_best = gs[best].astype(np.float64)
+    _, _, spec_centroid, spec_bw, spec_rms = encoding_spectrum(G_best, dt, echo_idx)
     return WaveformDesign(
-        G=gs[best].astype(np.float64), dt=dt, echo_idx=echo_idx,
+        G=G_best, dt=dt, echo_idx=echo_idx,
         b_value=float(b_all[best]), b_delta=float(bd_all[best]),
         b_delta_target=float(b_delta), max_amplitude=float(amp_all[best]),
         max_slew=float(slew_all[best]), refocus_residual=float(refoc_all[best]),
         rf_window_leak=float(win_all[best]), m1_index=float(m1_all[best]),
         m2_index=float(m2_all[best]), maxwell_index=float(mx_all[best]),
+        spectral_rms_hz=spec_rms, spectral_centroid_hz=spec_centroid,
+        spectral_bandwidth_hz=spec_bw, spectral_target_hz=(f_target or None),
         active_constraints=active_names, feasible=bool(feasible),
         report={'n_restarts': n_restarts, 'n_feasible': int(feas.sum()),
                 'b_scale': float(b_scale), 'dt': dt,

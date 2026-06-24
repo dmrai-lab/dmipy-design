@@ -218,9 +218,35 @@ post-180 window, the real TE-shortening mechanism) or from a scanner sequence
 and the masks + 180 position are derived (echo_frac/rf_duration ignored).
 Round-trip in practice: scanner Opts (`PULSEQ_SYSTEMS`) + `.seq` skeleton →
 `SequenceTiming.from_pulseq` → design within hardware → MC-validate
-(`to_sim_waveform`) → `to_pulseq`.  NB at present `from_btensor_waveform` assumes
-the 180 at TE/2, so only symmetric-echo designs round-trip through the pedagogy
-path; asymmetric designs need the builder to un-fold at the design's `echo_idx`.
+(`to_sim_waveform`) → `to_pulseq`.  `from_btensor_waveform` carries the design's
+own `echo_idx` and the Bloch builder un-folds/places the 180 there (not hardcoded
+TE/2); an **off-centre 180 is guarded** (raises unless `allow_offcenter_180=True`)
+— it's a misaligned spin echo (static field refocuses at 2·t_180, not at TE).  The
+real asymmetry (encoding *windows*) keeps the 180 at TE/2 and round-trips freely.
+
+**Spectral paradigm (OGSE).** OGSE and PGSE share the *same* b-tensor (both linear);
+what distinguishes OGSE is temporal/spectral content, which the b-tensor can't see.
+So `design_waveform` **always reports the encoding power spectrum** (`spectral_rms_hz`
+/ `spectral_centroid_hz` / `spectral_bandwidth_hz`) for any waveform, and
+`spectral_freq=f` optionally drives the RMS encoding frequency to `f` (an OGSE-like
+oscillating waveform — for any `b_delta`).  Per `ln S ≈ −∫ D(ω)|q̃(ω)|² dω` you
+propagate the *realized* spectrum (bandwidth = how monochromatic it actually is)
+rather than assuming a pure single frequency, so frequency precision is a reported /
+optionally-constrained quantity, not a requirement.  `f_rms` is the FFT-free,
+differentiable constraint (`sqrt(γ²Σ|g|²/Σ|q|²)/2π`); centroid/bandwidth are a
+post-hoc FFT (`encoding_spectrum`).  Verified: no-spectral f_rms≈7Hz (PGSE-like,
+b≈19700), spectral_freq=80 → f_rms≈80 (b≈120 — the OGSE efficiency cost).
+
+**PGSTE groundwork** (`optimizers/stimulated_echo.py`).  PGSTE reuses the optimizer
+core *unchanged* (same q / b-tensor); only the structure differs (3×90 stimulated
+echo, no 180).  `StimulatedEchoTiming` is the timing analog: encoding in the two
+matched transverse periods τ₁/τ₃ around a long gradient-off mixing time TM (the
+effective sign flip / `echo_idx` sits in the dead middle), with **τ₁ = τ₃ enforced**
+for static refocus (the PGSTE analog of 180@TE/2).  `design_stimulated_echo` wraps
+`design_waveform` via the duck-typed `timing`.  TM gives a long *T1-limited*
+diffusion time; static field is immune during TM.  Done as groundwork; NOT yet:
+GPU validation of the encodings + a dmipy-sim 3×90 *playback* builder (the spin-echo
+`from_btensor_waveform` correctly refuses a PGSTE design via the off-centre guard).
 
 NB: the small (3×3) b-tensor contraction must be an explicit outer-product sum,
 not `einsum`/matmul — the matmul triggers an XLA "too small divisible part of the

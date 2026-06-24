@@ -265,3 +265,33 @@ def test_offcenter_180_is_guarded():
     Sequence.from_btensor_waveform(eff, dt, echo_idx=i_off, allow_offcenter_180=True)
     Sequence.from_btensor_waveform(eff, dt)
     Sequence.from_btensor_waveform(eff, dt, echo_idx=n_t // 2)
+
+
+# ---------------------------------------------------------------------------
+# Spectral paradigm — encoding spectrum reporting + OGSE frequency targeting
+# ---------------------------------------------------------------------------
+
+def test_spectral_content_always_reported():
+    """Every design reports its encoding spectrum (rms/centroid/bandwidth); the
+    target is None when no spectral_freq is requested."""
+    d = design_waveform(1.0, TE=TE, n_t=100, n_restarts=6, n_outer=5, inner_maxiter=60,
+                        null_M1=False, null_M2=False, maxwell=False)
+    for v in (d.spectral_rms_hz, d.spectral_centroid_hz, d.spectral_bandwidth_hz):
+        assert v is not None and v >= 0
+    assert d.spectral_target_hz is None
+
+
+def test_spectral_freq_produces_ogse():
+    """spectral_freq drives the RMS encoding frequency to the target (an OGSE-like
+    oscillating waveform) vs a low-frequency PGSE-like baseline; oscillation costs
+    b-efficiency, and the realized spectrum (incl. bandwidth) is reported."""
+    kw = dict(b_delta=1.0, G_max=G_MAX, slew_rate_max=S_MAX, TE=TE, n_t=160,
+              n_restarts=12, n_outer=12, null_M1=False, null_M2=False, maxwell=False)
+    base = design_waveform(**kw)                            # no spectral -> PGSE-like
+    ogse = design_waveform(**kw, spectral_freq=80.0)        # OGSE at 80 Hz
+    assert base.spectral_rms_hz < 20.0, f"baseline not low-freq: {base.spectral_rms_hz}"
+    assert abs(ogse.spectral_rms_hz - 80.0) / 80.0 < 0.15, (
+        f"f_rms did not track target: {ogse.spectral_rms_hz}")
+    assert ogse.spectral_rms_hz > 3 * base.spectral_rms_hz
+    assert ogse.b_value < base.b_value, "oscillation should cost b-efficiency"
+    assert ogse.spectral_bandwidth_hz > 0  # finite-duration spectral spread, reported
