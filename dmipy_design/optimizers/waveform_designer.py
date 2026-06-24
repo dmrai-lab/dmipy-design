@@ -581,7 +581,7 @@ def design_waveform(
 
 
 def min_te_for_b(b_target, b_delta, *, timing=None, te_lo=None, te_hi=None,
-                 te_max=0.25, tol_te=1e-3, verbose=False, **design_kwargs):
+                 te_max=0.25, tol_te=1e-3, n_seeds=1, verbose=False, **design_kwargs):
     """Smallest TE whose max-b design reaches ``b_target`` -- the first-class
     min-TE-at-given-b mode.
 
@@ -601,21 +601,34 @@ def min_te_for_b(b_target, b_delta, *, timing=None, te_lo=None, te_hi=None,
         timing floor (else 1 ms); ``te_hi`` is grown x1.5 until b_target is reached.
     te_max : float -- cap (s) for the upward search; raises if b_target is unreachable.
     tol_te : float -- stop when the TE bracket is narrower than this (s).
+    n_seeds : int -- design each TE over this many restart-RNG seeds (0..n_seeds-1) and
+        keep the BEST FEASIBLE (max b).  >1 makes b(TE) robust to the optimizer's seed-to-
+        seed variance on tight problems (so the result is reproducible and a fair match to
+        an equally seed-robust vanilla design); costs n_seeds designs per TE.
     **design_kwargs -- forwarded to ``design_waveform`` (G_max, slew_rate_max, n_t,
-        n_restarts, n_outer, null_M1/M2/maxwell, spectral_freq, seed, ...).
+        n_restarts, n_outer, null_M1/M2/maxwell, spectral_freq, ...; any ``seed`` is
+        overridden by the n_seeds sweep).
 
     Returns
     -------
     (design, te) : the feasible :class:`WaveformDesign` at the smallest TE reaching
         ``b_target``, and that TE (s).
     """
+    dkw = {k: v for k, v in design_kwargs.items() if k != 'seed'}
+
     def reached(te):
-        d = design_waveform(b_delta, TE=te, timing=timing, **design_kwargs)
-        ok = bool(d.feasible) and (d.b_value >= b_target)
+        best = None
+        for s in range(max(1, n_seeds)):
+            d = design_waveform(b_delta, TE=te, timing=timing, seed=s, **dkw)
+            # prefer feasible designs; among equal feasibility, the higher b
+            if best is None or (bool(d.feasible), d.b_value) > (bool(best.feasible),
+                                                                best.b_value):
+                best = d
+        ok = bool(best.feasible) and (best.b_value >= b_target)
         if verbose:
-            print(f"  min_te_for_b: TE={te*1e3:6.2f}ms  b={d.b_value/1e6:7.0f}  "
-                  f"feasible={d.feasible}  -> {'reaches' if ok else 'short'}")
-        return ok, d
+            print(f"  min_te_for_b: TE={te*1e3:6.2f}ms  b={best.b_value/1e6:7.0f}  "
+                  f"feasible={best.feasible}  -> {'reaches' if ok else 'short'}")
+        return ok, best
 
     floor = timing.min_TE() if timing is not None else 1e-3
     lo = max(float(te_lo) if te_lo is not None else floor, floor)
