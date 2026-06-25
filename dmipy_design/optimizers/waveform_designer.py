@@ -20,8 +20,9 @@ BIASES the measurement, whereas turning an unneeded one on only costs b-value
   * ``null_M1`` — velocity compensation, ``∫ t·g_eff dt = 0``.  Off ⇒ the signal
     is sensitive to bulk velocity (cardiac pulsation, CSF/flow, perfusion):
     velocity-dependent dephasing masquerades as diffusion and biases the metrics,
-    worst at high b and near vessels/ventricles/cord.  Costs the most b (~4×; the
-    classic flow-comp penalty).  Safe to disable only for static samples
+    worst at high b and near vessels/ventricles/cord.  Costs the most b among the
+    moments (~5× at fixed TE; the classic flow-comp penalty — see the cost table
+    below).  Safe to disable only for static samples
     (ex-vivo, fixed tissue, phantoms) or low b.
   * ``null_M2`` — acceleration compensation, ``∫ t²·g_eff dt = 0``.  Second-order
     (pulsatile) motion.  Safe to disable when velocity comp alone is adequate
@@ -38,6 +39,39 @@ BIASES the measurement, whereas turning an unneeded one on only costs b-value
 All three indices (``m1_index``, ``m2_index``, ``maxwell_index``) are reported on
 the result regardless of which flags were active, so the residual confound is
 always visible — even for a constraint left off.
+
+What each constraint costs (measured)
+-------------------------------------
+Measured on the default asymmetric spin-echo windows (3T Prisma: G_max=80 mT/m,
+slew=200 T/m/s, TE=60 ms, LTE, ``moment_tol=2e-2``).  b in s/mm²; the factor is
+relative to the unconstrained max-b (the cost is cumulative, in the order shown)::
+
+    constraints           b      factor   buys
+    --------------------------------------------------------------------------
+    none (PGSE bang-bang) 2250   1.0×     nothing — encode only
+    + M1 (velocity)        466   4.8×     immunity to bulk flow / perfusion /
+                                          CSF & cardiac pulsation (unbiased ADC
+                                          in moving tissue)          ← the big cost
+    + M2 (acceleration)    457  ~free     robustness to accelerating motion
+                                          (cardiac DTI)        ← ~free once M1 on
+    + Maxwell (concomitant)183   12×      no concomitant-field b-tensor bias
+                                          across the FOV (off-iso / low B0 /
+                                          strong G / tensor STE-PTE)  ← 2nd cost
+
+Two cautions on reading those factors:
+  * The factor is at FIXED (short) TE, where the optimizer is time-starved, so it
+    looks catastrophic.  The honest cost is MATCHED-b: the fully-constrained design
+    reaches the unconstrained-60ms b (2250) at TE≈103 ms — i.e. ~+43 ms of TE, a
+    ~2× SNR loss on white-matter T2 (~75 ms @3T), NOT a 12× b loss.
+  * For STILL-brain DWI near isocenter you typically need NONE of these — plain
+    PGSE is correct and keeps the full b.  Maxwell in particular is the expensive
+    one here AND is ~free/unneeded for time-symmetric or near-isocenter on-axis
+    LTE; drop it and the cost is ~5× (b≈466), paid for genuine flow immunity.
+The waveform gets visibly richer as constraints are added (the extra structure IS
+the compensation): unconstrained ≈ 2 lobes straddling the 180; M1+M2+Maxwell
+≈ 9 sign-alternating sub-lobes pre-180 / 2 post-180 (asymmetry follows the
+windows).  ``benchmarks/constraint_cost_waveforms.py`` regenerates the table + a
+figure of the shapes.
 
 Physics (the metrics double as the constraint functions)
 --------------------------------------------------------
