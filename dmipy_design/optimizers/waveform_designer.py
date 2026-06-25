@@ -445,10 +445,13 @@ def design_waveform(
     null_M1: bool = True,
     null_M2: bool = True,
     maxwell: bool = True,
+    moment_tol: float = 5e-2,
     spectral_freq: float = None,
     pns: bool = False,
     pns_target: float = 80.0,
     n_restarts: int = 48,
+    init_raw=None,
+    null_offregions: bool = False,
     seed: int = 0,
     inner_maxiter: int = 300,
     n_outer: int = 16,
@@ -516,7 +519,12 @@ def design_waveform(
     # readout are NOT nulled (they are ~0 already via g(0)=0 / g(TE)=0 and host the lobe
     # ramps; nulling them creates big edge steps that collapse b).
     null_180_np = np.ones(n_t)
-    if rf_mask_np[echo_idx] > 0.5:
+    if null_offregions:
+        # hard-null EVERY off-region (lead-in / 180 / readout): g structurally 0 outside the
+        # encoding windows, so the optimizer cannot steal the readout/lead-in dead-time to
+        # inflate b (the soft RF-window penalty is exploitable from aggressive seeds).
+        null_180_np = 1.0 - rf_mask_np
+    elif rf_mask_np[echo_idx] > 0.5:
         lo180 = hi180 = echo_idx
         while lo180 > 0 and rf_mask_np[lo180 - 1] > 0.5:
             lo180 -= 1
@@ -555,6 +563,14 @@ def design_waveform(
     axis_w = jax.random.uniform(kx, (n_restarts, 1, 3), minval=0.2, maxval=1.0)
     raw = (amp * axis_w * jnp.sin(2 * np.pi * freqs * tt + phase)
            + 0.3 * jax.random.normal(kn, (n_restarts, n_t, 3)))
+    if init_raw is not None:
+        # informed warm start(s): replace the random sinusoids with provided raw seeds
+        # (shape (k, n_t, 3)); n_restarts becomes k.  Lets an analytic/learned prior seed
+        # the local refine instead of multi-start random search.
+        raw = jnp.asarray(init_raw, dtype=raw.dtype)
+        if raw.ndim == 2:
+            raw = raw[None]
+        n_restarts = raw.shape[0]
 
     bc = lambda r: _b_and_constraints(r, dt, echo_idx, slew_rate_max, G_max,
                                       b_delta, rf_mask, slew_off_mask, t_arr, TE,
@@ -617,12 +633,18 @@ def design_waveform(
     feas = ((np.abs(bd_all - b_delta) < 2e-2) & (amp_all <= G_max * 1.01)
             & (slew_all <= slew_rate_max * 1.02) & (refoc_all < 1e-2)
             & (win_all <= G_max * 0.02))   # g is amplitude-nulled in off-regions -> ~0
+    # moment_tol gates how completely M1/M2/Maxwell must be nulled to count as feasible.
+    # It is NOT optimizer slack: b trades CONTINUOUSLY against compensation quality (the
+    # b–compensation correlation is ~0.87), so a loose gate admits barely-compensated
+    # high-b waveforms and makes the reported best-b look unstable across seeds.  Reporting
+    # b *at a stated compensation level* (a Pareto point) is the honest number; tighten this
+    # for a robustly-compensated design, loosen it to trade compensation for b deliberately.
     if null_M1:
-        feas &= (m1_all < 5e-2)
+        feas &= (m1_all < moment_tol)
     if null_M2:
-        feas &= (m2_all < 5e-2)
+        feas &= (m2_all < moment_tol)
     if maxwell:
-        feas &= (mx_all < 5e-2)
+        feas &= (mx_all < moment_tol)
     if f_target > 0.0:
         feas &= (np.abs(frms_all - f_target) / f_target < 0.15)   # RMS freq near target
     if pns:
