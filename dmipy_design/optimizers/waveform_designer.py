@@ -73,6 +73,15 @@ the compensation): unconstrained ≈ 2 lobes straddling the 180; M1+M2+Maxwell
 windows).  ``benchmarks/constraint_cost_waveforms.py`` regenerates the table + a
 figure of the shapes.
 
+That Maxwell multi-lobe "choppiness" is LARGELY INTRINSIC, not optimizer noise: the
+concomitant ∫s·g·gᵀ-null under asymmetric windows forces a multi-lobe waveform, and
+the clean low-constraint basin is provably not Maxwell-feasible (a clean seed warm-
+started into the Maxwell solve either keeps clean & violates Maxwell, or nulls Maxwell
+& goes choppy — confirmed across restarts, band-limit basis, soft penalty, and warm-
+start continuation).  ``smooth_weight`` trims the cosmetic part (~17→9 sign-changes at
+~10–15% b cost) but cannot reach the fully-clean shape while feasible: cleanliness and
+Maxwell-feasibility are a genuine Pareto, and b is constraint-limited, not under-solved.
+
 Physics (the metrics double as the constraint functions)
 --------------------------------------------------------
 Effective dephasing with the 180 sign flip folded in::
@@ -315,6 +324,36 @@ def _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask, null_180_mask=None)
     return g if null_180_mask is None else g * null_180_mask           # null the 180 window
 
 
+def _collimate(G, n_axes):
+    """Rotate a physical gradient G (n_t,3) into the rank-``n_axes`` subspace it already
+    (nearly) occupies: SVD G = U S Vᵀ, keep the top n_axes right-singular vectors as the new
+    canonical axes (x, then xy, then xyz) and drop the orthogonal remainder.  For a converged
+    LTE/PTE waveform the dropped energy is ~0, so b / b-tensor shape / refocusing / |G| / slew
+    are preserved (rotation is rigid; the remainder is negligible).  Gives a clean single-axis
+    LTE (or in-plane PTE) instead of the arbitrary oblique direction the rotation-degenerate
+    3D solve lands on.  (b, M1, M2 are rotation-invariant; the Maxwell matrix rotates as a
+    tensor, so a nulled-to-zero Maxwell stays nulled.)"""
+    if n_axes >= 3:
+        return np.asarray(G, float)
+    G = np.asarray(G, float)
+    Vt = np.linalg.svd(G, full_matrices=False)[2]            # (3,3), rows = right sing. vecs
+    coords = G @ Vt[:n_axes].T                                # (n_t, n_axes) in dominant frame
+    out = np.zeros_like(G)
+    out[:, :n_axes] = coords                                  # place onto the first n_axes axes
+    return out
+
+
+def _roughness(g):
+    """Mean-square second difference (curvature / bending energy) of g (n_t,3): large for the
+    spurious high-frequency wiggle the optimizer uses to fine-tune a tight quadratic constraint
+    (Maxwell), small for clean few-lobe structure.  Used as a SOFT objective regularizer
+    (``smooth_weight``) -- unlike a hard band-limit (``n_basis``), it keeps full DOF so the
+    optimizer can still hit feasibility, but pays for high-frequency content, so among feasible
+    waveforms it prefers the smoothest.  The basis starves a tight null; this does not."""
+    d2 = g[2:] - 2.0 * g[1:-1] + g[:-2]                      # discrete curvature
+    return jnp.mean(jnp.sum(d2 ** 2, axis=1))
+
+
 def _rms_frequency(g, q):
     """RMS encoding frequency f_rms (Hz) — the FFT-free spectral-content measure.
 
@@ -480,6 +519,10 @@ def design_waveform(
     null_M2: bool = True,
     maxwell: bool = True,
     moment_tol: float = 5e-2,
+    n_axes: int = None,
+    collimate: bool = True,
+    n_basis: int = None,
+    smooth_weight: float = 0.0,
     spectral_freq: float = None,
     pns: bool = False,
     pns_target: float = 80.0,
@@ -519,6 +562,29 @@ def design_waveform(
         formalism (``ln S ≈ −∫ D(ω)|q̃(ω)|² dω``) you propagate the actual encoding
         spectrum into modelling rather than assuming a pure single frequency, so
         the bandwidth quantifies how monochromatic the result actually is.
+    n_axes : int or None, default None
+        Number of gradient axes the result is COLLIMATED onto = rank of the target
+        b-tensor (LTE→1, PTE→2, STE/intermediate→3); None auto-selects.  The solve is
+        always full-3D (the redundant axes are a benign rotational redundancy that aids
+        convergence — a from-scratch 1-axis LTE solve converges WORSE); the winner is then
+        SVD-rotated into the rank subspace.  Override to force a different axis count.
+    collimate : bool, default True
+        Collimate the winning 3D waveform into the ``n_axes`` subspace (clean single-axis
+        LTE / in-plane PTE on canonical axes).  Lossless for a converged rank-≤3 design
+        (b / shape / refocus / |G| / slew preserved; b, M1, M2 are rotation-invariant).
+    n_basis : int or None, default None
+        Band-limit the time parameterization to K low-frequency DCT cosines (smooth BY
+        CONSTRUCTION).  None / ≥n_t = full resolution.  Useful to suppress high-frequency
+        wiggle on the unconstrained / M1 / M2 / OGSE problems, but COUNTERPRODUCTIVE for
+        Maxwell (it starves the tight ∫g²-null of the DOF it needs — see ``smooth_weight``).
+    smooth_weight : float, default 0.0
+        Soft roughness (mean-square curvature) penalty added to the objective.  Unlike
+        ``n_basis`` it keeps full DOF (so it can still hit a tight constraint) but makes
+        high-frequency content cost b — a tunable cleanliness↔b dial.  On Maxwell it trims
+        the oscillation count (~17→9 sign-changes at high weight) for a ~10–15% b cost; it
+        CANNOT reach the fully-clean shape while feasible, because the Maxwell ∫g²-null under
+        asymmetric windows genuinely REQUIRES a multi-lobe waveform (the clean low-constraint
+        basin is not Maxwell-feasible — confirmed by warm-start continuation).
     n_t, echo_frac, rf_duration : see module docstring.
     n_restarts, seed, inner_maxiter, n_outer : solver controls.
 
@@ -587,6 +653,42 @@ def design_waveform(
     active_names = tuple(CONSTRAINT_NAMES[i] for i in active)
     n_active = len(active)
 
+    # encoding-axis budget = rank of the TARGET b-tensor: LTE (b_delta=1) is rank-1, PTE
+    # (b_delta=-0.5) planar rank-2, STE and all intermediate b_delta rank-3.  NOTE we do NOT
+    # confine the OPTIMIZATION to that many axes: empirically a from-scratch 1-axis LTE solve
+    # converges WORSE than the full 3-axis solve (b 1437 vs 2306 at matched restarts) -- the
+    # redundant axes are a beneficial over-parameterization that lets L-BFGS route around
+    # local barriers.  Instead we solve in full 3D and COLLIMATE the winner to the rank
+    # subspace post hoc (SVD-rotate the dominant direction(s) to the canonical axes, drop the
+    # near-zero remainder) -- which is essentially lossless (b/shape/refocus/|G|/slew all
+    # preserved) and yields a clean single-/double-axis waveform.
+    if n_axes is None:
+        n_axes = 1 if abs(b_delta - 1.0) < 1e-6 else (2 if abs(b_delta + 0.5) < 1e-6 else 3)
+    n_axes = int(np.clip(n_axes, 1, 3))
+
+    # smooth-basis (band-limited) time parameterization.  With n_basis free time-samples per
+    # axis the optimizer satisfies a quadratic constraint (esp. Maxwell) with cheap HIGH-
+    # FREQUENCY wiggle -- a choppy, B-SUBOPTIMAL local minimum that more restarts do not
+    # escape (the clean low-freq envelope reaches higher b).  Restricting raw(t) to the span
+    # of K low-frequency DCT cosines makes the waveform smooth BY CONSTRUCTION, so that noise
+    # is simply not expressible, while K stays large enough for the few-lobe structure a
+    # constraint genuinely needs.  None / >=n_t -> full resolution (legacy).  Unlike the
+    # spatial axes (a benign rotational redundancy that HELPS and is projected out), extra
+    # time DOF add real local minima, so here we RESTRICT rather than expand.
+    K = n_t if (n_basis is None or int(n_basis) >= n_t) else int(n_basis)
+    if K >= n_t:
+        Phi = None                                            # identity: full-resolution raw
+    else:
+        j = np.arange(n_t)[:, None]; kk = np.arange(K)[None, :]
+        Phi_np = np.cos(np.pi / n_t * (j + 0.5) * kk)         # (n_t,K) DCT-II cosines
+        Phi_np /= np.linalg.norm(Phi_np, axis=0, keepdims=True)   # orthonormal columns
+        Phi = jnp.asarray(Phi_np)
+    # coeffs (K,3) -> raw (n_t,3).  Broadcast-multiply-sum, NOT matmul/einsum: the tiny c=3
+    # contracting/output dim trips an XLA GPU dot-autotuning bug ("too small divisible part
+    # of the contracting dimension"); the explicit sum compiles cleanly.
+    to_raw = ((lambda c: c) if Phi is None
+              else (lambda c: jnp.sum(Phi[:, :, None] * c[None, :, :], axis=1)))
+
     # structured (q-MAS-like) + random warm starts
     key = jax.random.PRNGKey(seed)
     kf, kp, ka, kx, kn = jax.random.split(key, 5)
@@ -606,6 +708,12 @@ def design_waveform(
             raw = raw[None]
         n_restarts = raw.shape[0]
 
+    # the optimizer variable is `var` -- raw samples (Phi is None) or DCT coeffs (project the
+    # warm-start raw onto the orthonormal basis: coeffs = Phiᵀ raw, as a broadcast-sum to
+    # avoid the small-matmul XLA bug).
+    var = (raw if Phi is None
+           else jnp.sum(Phi[None, :, :, None] * raw[:, :, None, :], axis=1))
+
     bc = lambda r: _b_and_constraints(r, dt, echo_idx, slew_rate_max, G_max,
                                       b_delta, rf_mask, slew_off_mask, t_arr, TE,
                                       f_target, pns_kernels, pns_target, null_180_mask)
@@ -617,28 +725,35 @@ def design_waveform(
     # a Python `for` loop; each fresh closure is a jit-cache miss, so the expensive
     # vmapped-LBFGS graph was XLA-recompiled ~n_outer times -- that recompilation, not the
     # arithmetic, dominated the wall clock for this small problem.)
-    def al_loss(r, lam_r, mu_s):
-        b, c_all = bc(r)
+    def al_loss(v, lam_r, mu_s):
+        raw_v = to_raw(v)                                     # v = raw samples or DCT coeffs
+        b, c_all = bc(raw_v)
         c = c_all[active_idx]
-        return -b / b_scale + jnp.sum(lam_r * c) + 0.5 * mu_s * jnp.sum(c ** 2)
+        loss = -b / b_scale + jnp.sum(lam_r * c) + 0.5 * mu_s * jnp.sum(c ** 2)
+        if smooth_weight > 0.0:                               # soft roughness regularizer
+            g = _waveform_from_raw(raw_v, dt, slew_rate_max, G_max, slew_off_mask, null_180_mask)
+            loss = loss + smooth_weight * _roughness(g) / (G_max ** 2)
+        return loss
 
     solver = LBFGS(fun=al_loss, maxiter=inner_maxiter, tol=1e-8,
                    jit=True, history_size=10)
 
     def _outer_step(carry, _):
-        raw_c, lam_c, mu_c = carry
-        raw_n = jax.vmap(lambda r, l: solver.run(r, l, mu_c).params)(raw_c, lam_c)
-        cs = jax.vmap(lambda r: bc(r)[1][active_idx])(raw_n)
+        var_c, lam_c, mu_c = carry
+        var_n = jax.vmap(lambda v, l: solver.run(v, l, mu_c).params)(var_c, lam_c)
+        cs = jax.vmap(lambda v: bc(to_raw(v))[1][active_idx])(var_n)
         lam_n = lam_c + mu_c * cs
         mu_n = jnp.minimum(mu_c * 4.0, 1e6)
-        return (raw_n, lam_n, mu_n), jnp.min(jnp.max(cs, axis=1))
+        return (var_n, lam_n, mu_n), jnp.min(jnp.max(cs, axis=1))
 
     @jax.jit
-    def _run_al(raw0, lam0):
-        return jax.lax.scan(_outer_step, (raw0, lam0, jnp.float32(10.0)),
+    def _run_al(var0, lam0):
+        return jax.lax.scan(_outer_step, (var0, lam0, jnp.float32(10.0)),
                             None, length=n_outer)
 
-    (raw, lam, mu), maxc_hist = _run_al(raw, jnp.zeros((n_restarts, n_active)))
+    (var, lam, mu), maxc_hist = _run_al(var, jnp.zeros((n_restarts, n_active)))
+    raw = (var if Phi is None                                          # back to raw samples
+           else jnp.sum(Phi[None, :, :, None] * var[:, None, :, :], axis=2))
     if verbose:
         for outer, h in enumerate(np.asarray(maxc_hist)):
             print(f"  outer {outer}: max|c| best={float(h):.2e}")
@@ -701,19 +816,46 @@ def design_waveform(
         feasible = False
 
     G_best = gs[best].astype(np.float64)
+
+    # collimate the winner into the rank-n_axes subspace (clean single-/double-axis output)
+    # and RE-derive the reported scalars from the actual emitted waveform, so b/refocus/
+    # moments/Maxwell are honest for what is returned (the projection is ~lossless, but the
+    # rotation makes Maxwell -- a tensor -- worth re-reading).
+    bv, bd, amp, slw, refoc, win, m1, m2, mx = (
+        float(b_all[best]), float(bd_all[best]), float(amp_all[best]),
+        float(slew_all[best]), float(refoc_all[best]), float(win_all[best]),
+        float(m1_all[best]), float(m2_all[best]), float(mx_all[best]))
+    if collimate and n_axes < 3:
+        G_best = _collimate(G_best, n_axes)
+        sgn = np.where(np.arange(n_t) < echo_idx, 1.0, -1.0)[:, None]
+        geff = sgn * G_best
+        q = GAMMA * np.cumsum(geff, axis=0) * dt
+        B = np.asarray(b_tensor(G_best, dt, echo_idx))
+        bv, bd = float(b_value(B)), float(b_delta_of(B))
+        amp = float(np.max(np.linalg.norm(G_best, axis=1)))
+        slw = float(np.max(np.linalg.norm(np.diff(G_best, axis=0) / dt, axis=1)))
+        refoc = float(np.linalg.norm(q[-1]) / (np.sqrt(np.max((q ** 2).sum(1))) + 1e-30))
+        win = float(np.max(np.linalg.norm(G_best, axis=1) * rf_mask_np))
+        M1 = (t[:, None] * geff).sum(0) * dt
+        M2 = ((t ** 2)[:, None] * geff).sum(0) * dt
+        Mmx = dt * np.einsum('t,ti,tj->ij', sgn[:, 0], G_best, G_best)
+        m1 = float(np.linalg.norm(M1) / (G_max * TE ** 2))
+        m2 = float(np.linalg.norm(M2) / (G_max * TE ** 3))
+        mx = float(np.linalg.norm(Mmx) / (G_max ** 2 * TE))
+
     _, _, spec_centroid, spec_bw, spec_rms = encoding_spectrum(G_best, dt, echo_idx)
     return WaveformDesign(
         G=G_best, dt=dt, echo_idx=echo_idx,
-        b_value=float(b_all[best]), b_delta=float(bd_all[best]),
-        b_delta_target=float(b_delta), max_amplitude=float(amp_all[best]),
-        max_slew=float(slew_all[best]), refocus_residual=float(refoc_all[best]),
-        rf_window_leak=float(win_all[best]), m1_index=float(m1_all[best]),
-        m2_index=float(m2_all[best]), maxwell_index=float(mx_all[best]),
+        b_value=bv, b_delta=bd,
+        b_delta_target=float(b_delta), max_amplitude=amp,
+        max_slew=slw, refocus_residual=refoc,
+        rf_window_leak=win, m1_index=m1,
+        m2_index=m2, maxwell_index=mx,
         spectral_rms_hz=spec_rms, spectral_centroid_hz=spec_centroid,
         spectral_bandwidth_hz=spec_bw, spectral_target_hz=(f_target or None),
         active_constraints=active_names, feasible=bool(feasible),
         report={'n_restarts': n_restarts, 'n_feasible': int(feas.sum()),
-                'b_scale': float(b_scale), 'dt': dt,
+                'b_scale': float(b_scale), 'dt': dt, 'n_axes': n_axes, 'n_basis': K,
                 'pns_pct': float(pns_all[best]), 'pns_target': float(pns_target),
                 'b_feasible_max': float(b_all[feas].max()) if feas.any() else None},
     )
