@@ -29,7 +29,7 @@ import numpy as np
 
 try:
     import jax, jax.numpy as jnp
-    from scipy.optimize import minimize
+    from scipy.optimize import minimize, NonlinearConstraint, Bounds
     _OK = True
 except ImportError:                                            # pragma: no cover
     _OK = False
@@ -47,7 +47,8 @@ def _rank_of(b_delta):
 
 def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.060,
                         n_t=200, timing, null_M1=True, null_M2=True, maxwell=True,
-                        spectral_freq=None, n_restarts=16, seed=0, maxiter=400, init_g=None):
+                        spectral_freq=None, n_restarts=16, seed=0, maxiter=400, init_g=None,
+                        method="slsqp", slew_mode="vector"):
     """NOW-style direct-g + SLSQP design for LTE/PTE/STE (+OGSE).  Returns a dict with G
     (n_t,3), b_value, the constraint indices, and feasibility."""
     if not _OK:
@@ -101,24 +102,50 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         g = gfull(x); q = qof(g)
         frms = jnp.sqrt(GAMMA ** 2 * jnp.sum(g ** 2) / (jnp.sum(q ** 2) + 1e-30)) / (2 * np.pi)
         return jnp.array([(frms - f_target) / (f_target + 1e-9)])
-    def slew_margin(x):
+    def slew_margin(x):                                       # vector-norm (nonlinear)
         d = jnp.diff(gfull(x), axis=0) / dt
         return (slew_rate_max - jnp.sqrt(jnp.sum(d ** 2, 1) + 1e-30)) / slew_rate_max   # ≥0
+    # per-axis LINEAR slew: |dg_k/dt| <= S_max/sqrt(na) per axis  => vector |dg/dt| <= S_max.
+    # Linear in x, so SLSQP's QP enforces it EXACTLY (the nonlinear vector-norm above gets
+    # linearized and left loose for multi-axis); conservative by ~1/sqrt(na) but feasibility-
+    # guaranteed.  Returns [c - dg_k, c + dg_k] over axes (both >=0 <=> |dg_k| <= c).
+    cax = slew_rate_max / np.sqrt(na)
+    def slew_margin_axis(x):
+        d = jnp.diff(gfull(x), axis=0) / dt                   # (n_t-1, na)
+        return jnp.concatenate([(cax - d).reshape(-1), (cax + d).reshape(-1)]) / slew_rate_max
     def amp_margin(x):
         g = gfull(x); return (G_max ** 2 - jnp.sum(g ** 2, 1)) / G_max ** 2             # ≥0
 
+    # slew_mode='penalty': fold the slew overshoot into the OBJECTIVE (SLSQP minimizes it as
+    # part of the cost, which it does reliably) instead of a hard inequality (which SLSQP
+    # leaves loose for the equality-heavy multi-axis problem, vector OR per-axis alike).
+    def negb_pen(x):
+        d = jnp.diff(gfull(x), axis=0) / dt
+        sl = jnp.sqrt(jnp.sum(d ** 2, 1) + 1e-30)
+        return negb(x) + 50.0 * jnp.sum(jnp.maximum(sl / slew_rate_max - 1.0, 0.0) ** 2)
+
     jit = jax.jit
-    f_val, f_jac = jit(negb), jit(jax.grad(negb))
+    obj = negb_pen if slew_mode == "penalty" else negb
+    f_val, f_jac = jit(obj), jit(jax.grad(obj))
     eqs = [c_refoc]
     if na >= 2:        eqs.append(c_shape)
     if null_M1:        eqs.append(c_m1)
     if null_M2:        eqs.append(c_m2)
     if maxwell:        eqs.append(c_mxwl)
     if f_target > 0.0: eqs.append(c_spec)
-    cons = [{"type": "eq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in eqs]
-    cons += [{"type": "ineq", "fun": jit(slew_margin), "jac": jit(jax.jacfwd(slew_margin))},
-             {"type": "ineq", "fun": jit(amp_margin), "jac": jit(jax.jacfwd(amp_margin))}]
-    bounds = [(-G_max, G_max)] * (nf * na)                     # loose per-component box (helps SLSQP)
+    ineqs = ([amp_margin] if slew_mode == "penalty"
+             else [slew_margin_axis if slew_mode == "per_axis" else slew_margin, amp_margin])
+    if method == "trust-constr":
+        # interior-point: handles the many vector-slew inequalities far better than SLSQP's
+        # active-set (which satisfies equalities first and leaves the slew ineq loose for
+        # multi-axis).  eq: lb=ub=0; ineq: lb=0, ub=inf.
+        cons = ([NonlinearConstraint(jit(fn), 0.0, 0.0, jac=jit(jax.jacfwd(fn))) for fn in eqs]
+                + [NonlinearConstraint(jit(fn), 0.0, np.inf, jac=jit(jax.jacfwd(fn))) for fn in ineqs])
+        bounds = Bounds(-G_max, G_max)
+    else:
+        cons = [{"type": "eq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in eqs]
+        cons += [{"type": "ineq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in ineqs]
+        bounds = [(-G_max, G_max)] * (nf * na)                 # loose per-component box
 
     rng = np.random.default_rng(seed)
     edge = np.sin(np.linspace(0.0, np.pi, nf))                 # 0 at window edges
@@ -145,6 +172,10 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         inits.insert(0, ig[free].reshape(-1))
 
     def solve(x0, iters):                                     # negb is already O(1)-scaled
+        if method == "trust-constr":
+            return minimize(lambda x: float(f_val(x)), x0, jac=lambda x: np.asarray(f_jac(x)),
+                            method="trust-constr", bounds=bounds, constraints=cons,
+                            options={"maxiter": iters, "gtol": 1e-8, "xtol": 1e-10}).x
         return minimize(lambda x: float(f_val(x)), x0, jac=lambda x: np.asarray(f_jac(x)),
                         method="SLSQP", bounds=bounds, constraints=cons,
                         options={"maxiter": iters, "ftol": 1e-9}).x
