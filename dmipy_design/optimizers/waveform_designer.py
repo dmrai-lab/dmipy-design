@@ -132,7 +132,7 @@ GAMMA = 267.513e6  # rad/s/T — matches dmipy_sim.constants.GAMMA
 
 # Fixed constraint order; the AL uses a flag-selected subset, the report shows all.
 CONSTRAINT_NAMES = ('refocus', 'shape', 'g(TE)=0', 'RF-window', 'slew',
-                    'M1', 'M2', 'maxwell', 'spectral', 'pns')
+                    'M1', 'M2', 'maxwell', 'spectral', 'pns', 'heat')
 _BASE_CONSTRAINTS = (0, 1, 2, 3, 4)   # always active (validity)
 
 
@@ -409,13 +409,15 @@ def _safe_pns_pct(g, dt, kernels):
 
 def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
                        slew_off_mask, t_arr, TE, f_target=0.0,
-                       pns_kernels=None, pns_target=80.0, null_180_mask=None):
-    """Return (b, c) where c is the full (9,) vector of equality violations.
+                       pns_kernels=None, pns_target=80.0, null_180_mask=None,
+                       eta=None):
+    """Return (b, c) where c is the full (11,) vector of equality/inequality violations.
 
     Each entry is a normalized squared violation (0 = satisfied); the AL selects
     an active subset and the report reads them all.  ``f_target`` (Hz) drives the
     RMS encoding frequency (spectral content) when the spectral constraint is
-    active; 0 leaves that entry inert.
+    active; 0 leaves that entry inert.  ``eta`` (heat budget fraction) caps the mean
+    gradient energy ⟨g²⟩ ≤ eta·g_max²; None leaves the heat entry inert.
     """
     g = _waveform_from_raw(raw, dt, s_max, g_max, slew_off_mask, null_180_mask)
     B = b_tensor(g, dt, echo_idx)
@@ -441,6 +443,14 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
         c_pns = jnp.maximum(_safe_pns_pct(g, dt, pns_kernels) / pns_target - 1.0, 0.0)
     else:
         c_pns = 0.0
+    # heat / energy (NOW's coil-heating constraint): one-sided cap on mean gradient energy
+    # ⟨g²⟩ <= eta·g_max².  Bounding the energy budget forces the optimizer to spend gradient
+    # on sustained low-frequency lobes (high b per unit energy) rather than full-swing
+    # high-frequency wiggle (which is energetically expensive) -> cleaner high-slew waveforms.
+    if eta is not None:
+        c_heat = jnp.maximum(jnp.mean(gnorm ** 2) / (eta * g_max ** 2) - 1.0, 0.0)
+    else:
+        c_heat = 0.0
 
     c = jnp.array([
         jnp.sum(q[-1] ** 2) / (jnp.max(q2) + 1e-30),                  # 0 refocus (M0)
@@ -453,6 +463,7 @@ def _b_and_constraints(raw, dt, echo_idx, s_max, g_max, b_delta, rf_mask,
         jnp.sum(Mmx ** 2) / (g_max ** 2 * TE) ** 2,                  # 7 Maxwell
         c_spec,                                                      # 8 spectral (f_rms→f)
         c_pns,                                                       # 9 PNS (SAFE <= target)
+        c_heat,                                                      # 10 heat (⟨g²⟩<=eta·gmax²)
     ])
     return b, c
 
@@ -526,6 +537,8 @@ def design_waveform(
     spectral_freq: float = None,
     pns: bool = False,
     pns_target: float = 80.0,
+    heat: bool = False,
+    eta: float = 0.7,
     n_restarts: int = 48,
     init_raw=None,
     null_offregions: bool = False,
@@ -585,6 +598,20 @@ def design_waveform(
         CANNOT reach the fully-clean shape while feasible, because the Maxwell ∫g²-null under
         asymmetric windows genuinely REQUIRES a multi-lobe waveform (the clean low-constraint
         basin is not Maxwell-feasible — confirmed by warm-start continuation).
+    heat : bool, default False
+        Enable the coil-heating / energy constraint ⟨g²⟩ ≤ ``eta``·G_max² (NOW's
+        heat term).  A genuine deliverability constraint for long/dense protocols.
+        NOTE it is NOT a smoother: high-slew "choppiness" is low-amplitude HIGH-
+        FREQUENCY wiggle, which is energetically cheap (a choppy max-b LTE already
+        sits at ⟨g²⟩≈0.4·G_max²), so the energy cap barely binds and does not clean
+        it (≈17→9 sign-changes at most, like any added constraint perturbing the
+        basin — NOT NOW's clean ~1).  To target high-frequency content directly use
+        ``smooth_weight``; NOW's smoothness comes from its direct-g / SQP / smoothing-
+        quadratic parameterization + clinical slew, not from this term.
+    eta : float, default 0.7
+        Heat budget fraction (only used when ``heat=True``): the mean gradient energy
+        cap as a fraction of full-amplitude power.  Lower = stricter (less b, cooler
+        coil).  ``report['heat_frac']`` reads the realized ⟨g²⟩/G_max².
     n_t, echo_frac, rf_duration : see module docstring.
     n_restarts, seed, inner_maxiter, n_outer : solver controls.
 
@@ -649,6 +676,9 @@ def design_waveform(
         active.append(8)
     if pns:
         active.append(9)
+    if heat:
+        active.append(10)
+    eta_arg = float(eta) if heat else None
     active_idx = jnp.asarray(active)
     active_names = tuple(CONSTRAINT_NAMES[i] for i in active)
     n_active = len(active)
@@ -716,7 +746,8 @@ def design_waveform(
 
     bc = lambda r: _b_and_constraints(r, dt, echo_idx, slew_rate_max, G_max,
                                       b_delta, rf_mask, slew_off_mask, t_arr, TE,
-                                      f_target, pns_kernels, pns_target, null_180_mask)
+                                      f_target, pns_kernels, pns_target, null_180_mask,
+                                      eta_arg)
 
     # --- augmented Lagrangian, per-restart multipliers, vmapped on GPU ---
     # The loss + LBFGS solver are built ONCE (μ, λ flow in as traced args) and the whole
@@ -768,16 +799,17 @@ def design_waveform(
         refoc = jnp.sqrt(jnp.sum(q[-1] ** 2)) / (jnp.sqrt(jnp.max(jnp.sum(q ** 2, axis=1))) + 1e-30)
         _, c_all = bc(r)
         pns_pct = _safe_pns_pct(g, dt, pns_kernels) if pns_kernels is not None else 0.0
+        heat_frac = jnp.mean(gnorm ** 2) / G_max ** 2          # ⟨g²⟩/gmax² (NOW eta budget)
         return jnp.array([b_value(B), b_delta_of(B), jnp.max(gnorm), jnp.max(slew),
                           refoc, jnp.max(gnorm * rf_mask),
                           jnp.sqrt(c_all[5]), jnp.sqrt(c_all[6]), jnp.sqrt(c_all[7]),
-                          _rms_frequency(g, q), pns_pct]), g
+                          _rms_frequency(g, q), pns_pct, heat_frac]), g
 
     metrics, gs = jax.vmap(_metrics)(raw)
     metrics = np.asarray(metrics)
     gs = np.asarray(gs)
     (b_all, bd_all, amp_all, slew_all, refoc_all, win_all,
-     m1_all, m2_all, mx_all, frms_all, pns_all) = metrics.T
+     m1_all, m2_all, mx_all, frms_all, pns_all, heat_all) = metrics.T
 
     feas = ((np.abs(bd_all - b_delta) < 2e-2) & (amp_all <= G_max * 1.01)
             & (slew_all <= slew_rate_max * 1.02) & (refoc_all < 1e-2)
@@ -798,6 +830,8 @@ def design_waveform(
         feas &= (np.abs(frms_all - f_target) / f_target < 0.15)   # RMS freq near target
     if pns:
         feas &= (pns_all <= pns_target * 1.02)                    # SAFE PNS within target
+    if heat:
+        feas &= (heat_all <= eta * 1.05)                          # mean energy within budget
 
     if feas.any():
         cand = np.where(feas)[0]
@@ -811,7 +845,8 @@ def design_waveform(
                 + (m1_all if null_M1 else 0) + (m2_all if null_M2 else 0)
                 + (mx_all if maxwell else 0)
                 + (np.abs(frms_all - f_target) / f_target if f_target > 0 else 0)
-                + (np.maximum(pns_all / pns_target - 1.0, 0) if pns else 0))
+                + (np.maximum(pns_all / pns_target - 1.0, 0) if pns else 0)
+                + (np.maximum(heat_all / eta - 1.0, 0) if heat else 0))
         best = int(np.argmin(viol))
         feasible = False
 
@@ -857,6 +892,7 @@ def design_waveform(
         report={'n_restarts': n_restarts, 'n_feasible': int(feas.sum()),
                 'b_scale': float(b_scale), 'dt': dt, 'n_axes': n_axes, 'n_basis': K,
                 'pns_pct': float(pns_all[best]), 'pns_target': float(pns_target),
+                'heat_frac': float(heat_all[best]), 'eta': (float(eta) if heat else None),
                 'b_feasible_max': float(b_all[feas].max()) if feas.any() else None},
     )
 
