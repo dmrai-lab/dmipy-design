@@ -109,21 +109,42 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         A = sp.block_diag([((tt ** 2 * s)[free, 0] * dt).reshape(1, -1)] * na).toarray()
         cons.append({"type": "eq", "fun": (lambda A: lambda x: A @ x)(A), "jac": (lambda A: lambda x: A)(A)})
 
-    # ---- nonlinear: b-tensor SHAPE (component equalities) + optional Maxwell ----
+    # ---- nonlinear: b-tensor SHAPE + optional Maxwell, with ANALYTIC Jacobians ----
+    # Constant normalization (not /trace) so the constraint is a pure quadratic form in g and
+    # its Jacobian is a linear combination of dB_jk/dg = γ dt² s[a]·(δ_jm Qrev[a,k]+δ_km Qrev[a,j]),
+    # Qrev[a,k]=Σ_{t>=a} q[t,k] (the SAME reverse-cumsum as the objective gradient).
+    bcoef = GAMMA * dt ** 2 * s[free, 0]                       # (nf,)  for dB/dg at free samples
+    SHP = ([((0, 0), (1, 1)), ((0, 1), None)] if na == 2 else
+           [((0, 0), (1, 1)), ((1, 1), (2, 2)), ((0, 1), None), ((0, 2), None), ((1, 2), None)])
+    def _dBdx(Qrev, j, k):
+        v = np.zeros(nvar)
+        if j == k: v[j * nf:(j + 1) * nf] = 2 * bcoef * Qrev[free, j]
+        else:
+            v[j * nf:(j + 1) * nf] += bcoef * Qrev[free, k]; v[k * nf:(k + 1) * nf] += bcoef * Qrev[free, j]
+        return v
     def c_shape(x):
-        B = Bof(qof(gof(x))); tr = np.trace(B) + 1e-30
-        if na == 2:
-            return np.array([B[0, 0] - B[1, 1], B[0, 1]]) / tr
-        return np.array([B[0, 0] - B[1, 1], B[1, 1] - B[2, 2], B[0, 1], B[0, 2], B[1, 2]]) / tr
+        B = Bof(qof(gof(x)))
+        return np.array([(B[p] - B[q]) if q else B[p] for p, q in SHP]) / bscale
+    def j_shape(x):
+        q = qof(gof(x)); Qrev = np.flip(np.cumsum(np.flip(q, 0), 0), 0)
+        return np.array([(_dBdx(Qrev, *p) - _dBdx(Qrev, *q)) if q else _dBdx(Qrev, *p) for p, q in SHP]) / bscale
     if na >= 2:
-        cons.append({"type": "eq", "fun": c_shape})
+        cons.append({"type": "eq", "fun": c_shape, "jac": j_shape})
     if maxwell:
-        iu = np.triu_indices(na)
+        iu = list(zip(*np.triu_indices(na))); mcoef = dt / (G_max ** 2 * TE) * s[free, 0]
         def c_mx(x):
-            g = gof(x)
-            M = (s[:, :, None] * g[:, :, None] * g[:, None, :]).sum(0) * dt / (G_max ** 2 * TE)
-            return M[iu]
-        cons.append({"type": "eq", "fun": c_mx})
+            g = gof(x); M = (s[:, :, None] * g[:, :, None] * g[:, None, :]).sum(0) * dt / (G_max ** 2 * TE)
+            return np.array([M[j, k] for j, k in iu])
+        def j_mx(x):                                          # dM_jk/dg[a,m]=mcoef[a](δ_jm g[a,k]+δ_km g[a,j])
+            g = gof(x); rows = []
+            for j, k in iu:
+                v = np.zeros(nvar)
+                if j == k: v[j * nf:(j + 1) * nf] = 2 * mcoef * g[free, j]
+                else:
+                    v[j * nf:(j + 1) * nf] += mcoef * g[free, k]; v[k * nf:(k + 1) * nf] += mcoef * g[free, j]
+                rows.append(v)
+            return np.array(rows)
+        cons.append({"type": "eq", "fun": c_mx, "jac": j_mx})
     bounds = [(-G_max, G_max)] * nvar                         # amplitude box
 
     rng = np.random.default_rng(seed); edge = np.sin(np.linspace(0, np.pi, nf))
