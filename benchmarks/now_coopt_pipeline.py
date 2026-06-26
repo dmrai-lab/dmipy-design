@@ -27,23 +27,31 @@ from jax import grad, jit
 import optax
 
 from dmipy_design.optimizers import design_waveform_now
+from dmipy_sim.sequences import scanner_constants as scc
 
 GAMMA = 267.513e6
 jax.config.update("jax_enable_x64", True)
 
-# ---- provisional scanner limits (typical 3T body coil) -- TO BE REPLACED by the cited catalogue
+# ---- hardware/safety limits pulled from the CITED scanner-constants catalogue ----
+# GE SIGNA Premier (3T): the model with cited RF numbers (peak B1 19 µT @75 kg, RF raster 1 µs).
+SCANNER_MODEL = "ge_signa_premier_3T"
+G_max, slew_max = scc.gradient_limits(SCANNER_MODEL, regime="diffusion")   # T/m, T/m/s (PNS-aware)
 SCANNER = dict(
-    B1_max=15e-6,        # T, peak B1 (typical 3T body-coil; vendor/coil-dependent)  [NEEDS VERIFICATION]
-    rf_raster=1e-6,      # s, RF DAC raster (Siemens IDEA / pulseq standard)
-    sar_headroom=1.30,   # SAR budget as a multiple of the plain hard-180 power (demo proxy)
-)
+    B1_max=scc.get_limit(SCANNER_MODEL, "rf", "peak_B1_body_coil", si=True),  # 19 µT @75kg, cited
+    rf_raster=scc.get_limit("siemens_magnetom_prisma_3T", "rf", "rf_raster_time", si=True),  # 1 µs (IDEA/Pulseq std), cited
+    sar_headroom=1.30,   # SAR budget as a multiple of the plain hard-180 power (relative proxy;
+)                        # the absolute IEC W/kg limit lives in scc.sar_limit())
 
 # ----------------------------------------------------------------------------
 # Stage 1 -- NOW designs the constraint-optimal LTE gradient (finer grid for RF resolution).
 # ----------------------------------------------------------------------------
+print("Scanner: %s  (G_max=%.0f mT/m, slew=%.0f T/m/s diffusion-derated, peakB1=%.0f uT, "
+      "RF raster=%.0f us — all cited)"
+      % (SCANNER_MODEL, G_max * 1e3, slew_max, SCANNER["B1_max"] * 1e6, SCANNER["rf_raster"] * 1e6),
+      flush=True)
 TE, n_t = 0.060, 280
-d = design_waveform_now(b_delta=1.0, TE=TE, n_t=n_t, null_M1=True, null_M2=True,
-                        maxwell=False, n_restarts=6)
+d = design_waveform_now(b_delta=1.0, G_max=G_max, slew_rate_max=slew_max, TE=TE, n_t=n_t,
+                        null_M1=True, null_M2=True, maxwell=False, n_restarts=6)
 dt = d.dt; echo = d.echo_idx; b_now = d.b_value
 geff = np.asarray(d.effective_G())
 g_axis = geff[:, int(np.argmax(np.sum(geff ** 2, axis=0)))]
