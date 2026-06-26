@@ -95,6 +95,25 @@ class NowDesign:
     pns_pct: float = 0.0        # %, peak SAFE PNS (% of stimulation limit); 0 if not constrained
     heat_frac: float = 0.0      # mean gradient energy ⟨g²⟩ as a fraction of G_max²
 
+    def effective_G(self):
+        """Effective (sign-folded) gradient — what dmipy-sim's b-from-waveform eats."""
+        s = np.where(np.arange(self.G.shape[0]) < self.echo_idx, 1.0, -1.0)[:, None]
+        return self.G * s
+
+    def to_sim_waveform(self, b_target=None):
+        """Build a dmipy-sim ``Waveform`` (effective gradient, echo at TE) for MC.
+
+        ``b_target`` (s/m²) optionally rescales the amplitude (b ∝ |G|²; the b-tensor
+        shape and refocusing are invariant under the rescale).  Mirrors
+        ``WaveformDesign.to_sim_waveform`` so NOW designs are drop-in for the sim bridge.
+        """
+        from dmipy_sim.waveforms import Waveform
+        G = self.effective_G()
+        if b_target is not None:
+            G = G * np.sqrt(b_target / self.b_value)
+        return Waveform(G=G[None].astype(np.float32), dt=self.dt,
+                        echo_idx=self.G.shape[0] - 1)
+
 
 def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.060, n_t=140,
                         timing=None, null_M1=True, null_M2=True, maxwell=False,
@@ -105,7 +124,7 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     ``timing`` is a ``SequenceTiming``; if None a default Prisma budget is used.  Returns a
     ``NowDesign`` with the physical gradient and the (machine-precision) constraint residuals.
     """
-    from dmipy_design.optimizers import SequenceTiming
+    from .timing import SequenceTiming
     if timing is None:
         timing = SequenceTiming(t_excite=3e-3, t_refocus=6e-3, t_readout_pre_echo=14e-3)
     na = _rank_of(b_delta) if n_axes is None else int(n_axes)

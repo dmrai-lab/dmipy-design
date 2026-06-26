@@ -145,11 +145,15 @@ def design_stimulated_echo(b_delta, *, TM, TE, t_excite=2e-3,
     """Design a PGSTE diffusion-encoding waveform (GROUNDWORK).
 
     Builds a :class:`StimulatedEchoTiming` for the given mixing time ``TM`` and
-    echo time ``TE`` and hands it to the validated ``design_waveform`` core via
-    its duck-typed ``timing`` interface — so b-tensor shape, refocusing, hardware
-    limits, and the optional M1/M2/Maxwell/spectral constraints all apply
-    unchanged.  Returns a :class:`WaveformDesign` whose gradient is the *effective*
-    PGSTE encoding (the long-TM hold gives the long, T1-limited diffusion time).
+    echo time ``TE`` and hands it to the NOW design oracle (``design_waveform_now``)
+    via its duck-typed ``timing`` interface — so b-tensor shape, refocusing, hardware
+    limits, and the optional M1/M2/Maxwell/spectral/PNS/heat constraints all apply
+    unchanged.  Returns a :class:`NowDesign` whose gradient is the *effective* PGSTE
+    encoding (the long-TM hold gives the long, T1-limited diffusion time).
+
+    ``design_kwargs`` are forwarded to ``design_waveform_now``; the legacy AL-solver
+    knobs (``heat``/``eta``, ``inner_maxiter``, and AL-only options) are mapped or
+    dropped, so existing call sites keep working.
 
     NOTE (build-out, not yet done): the result is an encoding, not a runnable
     sequence.  Playing it requires a dmipy-sim stimulated-echo builder that lays
@@ -157,10 +161,20 @@ def design_stimulated_echo(b_delta, *, TM, TE, t_excite=2e-3,
     will — correctly — refuse it via the off-centre-180 guard).  GPU validation
     of these encodings is also pending.
     """
-    from .waveform_designer import design_waveform
+    from .now import design_waveform_now
     timing = StimulatedEchoTiming(t_excite=t_excite, TM=TM, t_store=t_store,
                                   t_recall=t_recall, t_prep=t_prep, TE=TE)
-    return design_waveform(b_delta, timing=timing, TE=TE, **design_kwargs)
+    kw = dict(design_kwargs)
+    if kw.pop('heat', False):                       # AL: heat(bool)+eta -> NOW: heat_eta(value|None)
+        kw['heat_eta'] = kw.pop('eta', 0.7)
+    else:
+        kw.pop('eta', None)
+    if 'inner_maxiter' in kw:                        # AL inner-iteration knob -> NOW SQP maxiter
+        kw['maxiter'] = kw.pop('inner_maxiter')
+    for _al_only in ('echo_frac', 'rf_duration', 'moment_tol', 'collimate', 'n_basis',
+                     'smooth_weight', 'init_raw', 'null_offregions', 'n_outer', 'verbose'):
+        kw.pop(_al_only, None)
+    return design_waveform_now(b_delta, timing=timing, TE=TE, **kw)
 
 
 def pgste_store_recall_idx(timing, TE, n_t):
