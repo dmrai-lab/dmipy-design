@@ -18,8 +18,9 @@ the wall clock (minutes); with NumPy-analytic derivatives SciPy calls NumPy dire
 ~1 s).  And because SQP handles the constraints EXACTLY (not via a penalty), the objective is
 never dwarfed, so the b-value reaches the true optimum (rides slew=S_max and |G|=G_max).
 
-Covers LTE / PTE / STE (b_delta = 1 / -0.5 / 0) and OGSE is the natural extension (add the
-spectral row).  Single solver, all shapes -- the LTE problem is just the rank-1 case.
+Covers LTE / PTE / STE (b_delta = 1 / -0.5 / 0) and OGSE (pass ``spectral_freq``: a rank-1
+shape plus one extra equality pinning the encoding's RMS frequency, f_rms = target).  Single
+solver, all shapes -- the LTE problem is just the rank-1 case, OGSE the rank-1 + spectral case.
 """
 from __future__ import annotations
 import numpy as np
@@ -54,11 +55,12 @@ class NowDesign:
     m2_index: float
     maxwell_index: float
     feasible: bool
+    spectral_rms: float = 0.0   # Hz, RMS encoding frequency (OGSE); 0 for non-oscillating
 
 
 def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.060, n_t=140,
                         timing=None, null_M1=True, null_M2=True, maxwell=False,
-                        n_axes=None, n_restarts=8, maxiter=300, seed=0):
+                        spectral_freq=None, n_axes=None, n_restarts=8, maxiter=300, seed=0):
     """Design a max-b spin-echo gradient waveform via NOW's SQP recipe (LTE/PTE/STE).
 
     ``timing`` is a ``SequenceTiming``; if None a default Prisma budget is used.  Returns a
@@ -145,14 +147,34 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
                 rows.append(v)
             return np.array(rows)
         cons.append({"type": "eq", "fun": c_mx, "jac": j_mx})
+    if spectral_freq is not None:                             # OGSE: pin RMS encoding frequency
+        # ω_rms² = γ²·Σg²/Σq²  (Parseval: ∫(dq/dt)²dt = γ²∫g²dt, ∫q²dt the denominator).
+        # Equality on ω_rms²/ω_t² so f_rms = spectral_freq; analytic Jacobian (quotient rule).
+        wt2 = (2 * np.pi * spectral_freq) ** 2
+        def c_spec(x):
+            g = gof(x); q = qof(g)
+            return np.array([(GAMMA ** 2 * np.sum(g ** 2) / (np.sum(q ** 2) + 1e-30) - wt2) / wt2])
+        def j_spec(x):
+            g = gof(x); q = qof(g); Qrev = np.flip(np.cumsum(np.flip(q, 0), 0), 0)
+            N = np.sum(g ** 2); Dq = np.sum(q ** 2) + 1e-30
+            dN = np.zeros(nvar); dD = np.zeros(nvar)
+            for k in range(na):
+                dN[k * nf:(k + 1) * nf] = 2 * g[free, k]
+                dD[k * nf:(k + 1) * nf] = 2 * GAMMA * dt * s[free, 0] * Qrev[free, k]
+            return (GAMMA ** 2 * (dN * Dq - N * dD) / Dq ** 2 / wt2)[None, :]
+        cons.append({"type": "eq", "fun": c_spec, "jac": j_spec})
     bounds = [(-G_max, G_max)] * nvar                         # amplitude box
 
     rng = np.random.default_rng(seed); edge = np.sin(np.linspace(0, np.pi, nf))
+    # OGSE init oscillates near the target; bracket the lobe count symmetrically about the rough
+    # estimate (≈ 2·f·T_enc + 1 half-sines) so low-frequency targets get low-frequency starts too.
+    center = max(2, 2 * int(round(spectral_freq * nf * dt)) + 1) if spectral_freq is not None else 0
     best = None
     for r in range(n_restarts):
         x0 = np.zeros((na, nf))
         for k in range(na):
-            x0[k] = edge * np.sin((k + 1 + r) * np.linspace(0, np.pi, nf) + rng.uniform(0, 1)) * G_max * 0.5 / np.sqrt(na)
+            f_lobes = max(1, center - n_restarts // 2 + r) if spectral_freq is not None else (k + 1 + r)
+            x0[k] = edge * np.sin(f_lobes * np.linspace(0, np.pi, nf) + rng.uniform(0, 1)) * G_max * 0.5 / np.sqrt(na)
         res = minimize(fun, x0.reshape(-1), jac=True, method="SLSQP", bounds=bounds,
                        constraints=cons, options={"maxiter": maxiter, "ftol": 1e-9})
         g = gof(res.x); q = qof(g); B = Bof(q); b = float(np.trace(B))
@@ -163,13 +185,15 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         m1 = float(np.linalg.norm((tt * s * g).sum(0) * dt) / (G_max * TE ** 2))
         m2 = float(np.linalg.norm((tt ** 2 * s * g).sum(0) * dt) / (G_max * TE ** 3))
         mx = float(np.sqrt(np.sum(((s[:, :, None] * g[:, :, None] * g[:, None, :]).sum(0) * dt) ** 2)) / (G_max ** 2 * TE))
+        frms = float(GAMMA * np.sqrt(np.sum(g ** 2) / (np.sum(q ** 2) + 1e-30)) / (2 * np.pi))
+        spec_ok = spectral_freq is None or abs(frms - spectral_freq) / spectral_freq < 5e-2
         feas = (refoc < 1e-2 and sl <= slew_rate_max * 1.02 and amp <= G_max * 1.02
                 and (na < 2 or shape < 5e-2) and (not null_M1 or m1 < 5e-2)
-                and (not null_M2 or m2 < 5e-2) and (not maxwell or mx < 2e-2))
+                and (not null_M2 or m2 < 5e-2) and (not maxwell or mx < 2e-2) and spec_ok)
         G3 = np.zeros((n_t, 3)); G3[:, :na] = g
         cand = NowDesign(G=G3, dt=dt, echo_idx=echo, b_value=b, b_delta=float(b_delta), n_axes=na,
                          max_slew=sl, max_amplitude=amp, refocus_residual=refoc, shape_residual=shape,
-                         m1_index=m1, m2_index=m2, maxwell_index=mx, feasible=feas)
+                         m1_index=m1, m2_index=m2, maxwell_index=mx, feasible=feas, spectral_rms=frms)
         if feas and (best is None or b > best.b_value):
             best = cand
     return best if best is not None else cand
