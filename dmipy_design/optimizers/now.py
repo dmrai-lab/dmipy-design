@@ -30,6 +30,42 @@ from dataclasses import dataclass
 
 GAMMA = 267.513e6  # rad/s/T
 
+# SAFE PNS coefficients (Hebrank/Szczepankiewicz model) -- pypulseq's representative
+# Siemens-class example.  Per axis: tau1/2/3 (ms), a1/2/3, stim_limit, g_scale.  Canonical
+# NumPy copy for the NOW solver (the AL designer carries a JAX twin); the in-design constraint
+# shapes the waveform, pulseq_pns_report verifies the exact .asc on export.
+_SAFE_HW = (
+    dict(tau1=0.2, tau2=0.03, tau3=3.0, a1=0.4, a2=0.1, a3=0.5, stim_limit=30.0, g_scale=0.35),
+    dict(tau1=1.5, tau2=2.5, tau3=0.15, a1=0.55, a2=0.15, a3=0.3, stim_limit=15.0, g_scale=0.31),
+    dict(tau1=2.0, tau2=0.12, tau3=1.0, a1=0.42, a2=0.4, a3=0.18, stim_limit=25.0, g_scale=0.25),
+)
+
+
+def _safe_kernels(dt_ms, m):
+    """(9, m) causal RC-lowpass kernels (3 axes x 3 taus): alpha*(1-alpha)^k, alpha=dt/(tau+dt)."""
+    kers = []
+    for hw in _SAFE_HW:
+        for tau in (hw['tau1'], hw['tau2'], hw['tau3']):
+            alpha = dt_ms / (tau + dt_ms)
+            kers.append(alpha * (1.0 - alpha) ** np.arange(m))
+    return np.asarray(kers)
+
+
+def _pns_pct(G3, dt, kernels):
+    """Per-timepoint SAFE PNS (% of stimulation limit) of physical gradient G3 (n_t,3 T/m):
+    3 RC-lowpass terms per axis, normalized, L2-combined across axes -- same model as
+    pypulseq's calculate_pns.  Returns the (m,) time series (caller takes max / constrains all)."""
+    dgdt = np.diff(G3, axis=0) / dt                            # (m,3) T/m/s
+    m = dgdt.shape[0]; pns_sq = np.zeros(m)
+    for ax in range(3):
+        hw = _SAFE_HW[ax]; d = dgdt[:, ax]; k = 3 * ax
+        lp1 = np.convolve(d, kernels[k + 0])[:m]
+        lp2 = np.convolve(np.abs(d), kernels[k + 1])[:m]
+        lp3 = np.convolve(d, kernels[k + 2])[:m]
+        stim = hw['a1'] * np.abs(lp1) + hw['a2'] * lp2 + hw['a3'] * np.abs(lp3)
+        pns_sq += (stim / hw['stim_limit'] * hw['g_scale'] * 100.0) ** 2
+    return np.sqrt(pns_sq)
+
 
 def _rank_of(b_delta):
     if abs(b_delta - 1.0) < 1e-6:
@@ -56,11 +92,14 @@ class NowDesign:
     maxwell_index: float
     feasible: bool
     spectral_rms: float = 0.0   # Hz, RMS encoding frequency (OGSE); 0 for non-oscillating
+    pns_pct: float = 0.0        # %, peak SAFE PNS (% of stimulation limit); 0 if not constrained
+    heat_frac: float = 0.0      # mean gradient energy ⟨g²⟩ as a fraction of G_max²
 
 
 def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.060, n_t=140,
                         timing=None, null_M1=True, null_M2=True, maxwell=False,
-                        spectral_freq=None, n_axes=None, n_restarts=8, maxiter=300, seed=0):
+                        spectral_freq=None, pns=False, pns_target=80.0, heat_eta=None,
+                        n_axes=None, n_restarts=8, maxiter=300, seed=0):
     """Design a max-b spin-echo gradient waveform via NOW's SQP recipe (LTE/PTE/STE).
 
     ``timing`` is a ``SequenceTiming``; if None a default Prisma budget is used.  Returns a
@@ -163,6 +202,21 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
                 dD[k * nf:(k + 1) * nf] = 2 * GAMMA * dt * s[free, 0] * Qrev[free, k]
             return (GAMMA ** 2 * (dN * Dq - N * dD) / Dq ** 2 / wt2)[None, :]
         cons.append({"type": "eq", "fun": c_spec, "jac": j_spec})
+    if pns:                                                   # SAFE PNS <= pns_target % at every t
+        pkern = _safe_kernels(dt * 1e3, n_t - 1)              # physical gradient = g (not s·g)
+        def c_pns(x):                                         # one row per timepoint, all >= 0
+            G3 = np.zeros((n_t, 3)); G3[:, :na] = gof(x)
+            return pns_target - _pns_pct(G3, dt, pkern)       # FD Jacobian (nvar evals, cheap conv)
+        cons.append({"type": "ineq", "fun": c_pns})
+    if heat_eta is not None:                                  # coil heating: ⟨g²⟩ <= heat_eta·G_max²
+        hscale = n_t * heat_eta * G_max ** 2
+        def c_heat(x):
+            g = gof(x); return np.array([1.0 - np.sum(g ** 2) / hscale])
+        def j_heat(x):
+            g = gof(x); v = np.zeros(nvar)
+            for k in range(na): v[k * nf:(k + 1) * nf] = -2 * g[free, k] / hscale
+            return v[None, :]
+        cons.append({"type": "ineq", "fun": c_heat, "jac": j_heat})
     bounds = [(-G_max, G_max)] * nvar                         # amplitude box
 
     rng = np.random.default_rng(seed); edge = np.sin(np.linspace(0, np.pi, nf))
@@ -187,13 +241,18 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         mx = float(np.sqrt(np.sum(((s[:, :, None] * g[:, :, None] * g[:, None, :]).sum(0) * dt) ** 2)) / (G_max ** 2 * TE))
         frms = float(GAMMA * np.sqrt(np.sum(g ** 2) / (np.sum(q ** 2) + 1e-30)) / (2 * np.pi))
         spec_ok = spectral_freq is None or abs(frms - spectral_freq) / spectral_freq < 5e-2
+        G3 = np.zeros((n_t, 3)); G3[:, :na] = g
+        pns_pk = float(np.max(_pns_pct(G3, dt, _safe_kernels(dt * 1e3, n_t - 1)))) if pns else 0.0
+        heatf = float(np.sum(g ** 2) / (n_t * G_max ** 2))
         feas = (refoc < 1e-2 and sl <= slew_rate_max * 1.02 and amp <= G_max * 1.02
                 and (na < 2 or shape < 5e-2) and (not null_M1 or m1 < 5e-2)
-                and (not null_M2 or m2 < 5e-2) and (not maxwell or mx < 2e-2) and spec_ok)
-        G3 = np.zeros((n_t, 3)); G3[:, :na] = g
+                and (not null_M2 or m2 < 5e-2) and (not maxwell or mx < 2e-2) and spec_ok
+                and (not pns or pns_pk <= pns_target * 1.02)
+                and (heat_eta is None or heatf <= heat_eta * 1.02))
         cand = NowDesign(G=G3, dt=dt, echo_idx=echo, b_value=b, b_delta=float(b_delta), n_axes=na,
                          max_slew=sl, max_amplitude=amp, refocus_residual=refoc, shape_residual=shape,
-                         m1_index=m1, m2_index=m2, maxwell_index=mx, feasible=feas, spectral_rms=frms)
+                         m1_index=m1, m2_index=m2, maxwell_index=mx, feasible=feas, spectral_rms=frms,
+                         pns_pct=pns_pk, heat_frac=heatf)
         if feas and (best is None or b > best.b_value):
             best = cand
     return best if best is not None else cand
