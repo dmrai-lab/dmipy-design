@@ -75,27 +75,32 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     bscale = (GAMMA * G_max) ** 2 * TE ** 3 / 50.0
     iu = np.triu_indices(na)                                   # Maxwell upper-triangle (static)
 
-    # slew_param: mirror the AL designer's structural squash so SLEW and AMPLITUDE are bounded
-    # BY CONSTRUCTION (slew=Smax*tanh(|raw|)/|raw|*raw, g=cumsum(slew)*dt, g=Gmax*tanh(|g|/Gmax)*ĝ),
-    # removing the slew/amp inequalities entirely.  EMPIRICAL FINDING: this DOES make slew
-    # structural (slew<=Smax for all ranks), BUT with SLSQP the now-squashed EQUALITIES
-    # (refoc/shape/moments) are left unsatisfied (LTE refoc->1, b->unconstrained max) -- the
-    # active-set SQP can't drive the nonlinear-through-the-squash equalities.  Driving them needs
-    # an augmented-Lagrangian / penalty method -- which is exactly the AL designer
-    # (waveform_designer.design_waveform), the SINGLE solver that already does LTE/PTE/STE/OGSE
-    # via this same structural slew.  So: AL = unified all-shape solver; this SQP (slew_param=
-    # False, direct-g) = single-axis specialist (LTE/OGSE, cleaner + beats AL there).
-    nvar = (nf if slew_param else nf) * na                     # both parameterize the free samples
+    # slew_param=True: LINEAR per-axis slew -- the VARIABLE IS the slew, box-bounded [-Smax,Smax]
+    # per axis (the physical per-amplifier limit; box bounds are enforced exactly by SLSQP),
+    # g=cumsum(slew)*dt linear, amplitude as a per-axis linear inequality.
+    # EMPIRICAL (the multi-axis story, established across 6 formulations -- vector slew, per-axis
+    # slew, trust-constr, edge-erosion, objective-penalty, box-slew):
+    #   * single-axis (LTE/OGSE): every form works.
+    #   * multi-axis (PTE/STE): scipy SLSQP leaves the INEQUALITY constraints loose, whichever
+    #     they are -- box-slew fixes slew (=Smax exactly) but then AMPLITUDE blows up (g 0.3-1.2
+    #     T/m) and refoc fails; the tanh-structural form instead fails the squashed equalities.
+    # ROOT CAUSE = the SOLVER, not the formulation: scipy SLSQP can't enforce the multi-axis
+    # inequalities.  NOW does multi-axis via MATLAB fmincon (mature interior-point); our AL
+    # designer via structural tanh + augmented-Lagrangian penalty.  A NOW-faithful multi-axis
+    # SQP needs a fmincon-class interior-point (scipy trust-constr w/ cached/sparse Jacobians).
+    # So: AL (waveform_designer) = the single unified all-shape solver; this SQP (slew_param=
+    # False default, direct-g) = single-axis specialist (LTE/OGSE -- cleaner, beats AL, MC-valid).
     def gfull(x):                                              # x (nf*na,) -> g (n_t,na)
         raw = x.reshape(nf, na)
         if not slew_param:
             return jnp.zeros((n_t, na)).at[full_idx].set(raw)  # legacy direct-g (off=0)
-        rn = jnp.sqrt(jnp.sum(raw ** 2, axis=1, keepdims=True) + 1e-12)
-        slew = slew_rate_max * (jnp.tanh(rn) / rn) * raw       # |slew| <= Smax (structural)
-        slew_full = jnp.zeros((n_t, na)).at[full_idx].set(slew)   # slew=0 in off-regions
-        g_raw = dt * jnp.cumsum(slew_full, axis=0)             # g(0)=0
-        gn = jnp.sqrt(jnp.sum(g_raw ** 2, axis=1, keepdims=True) + 1e-12)
-        return G_max * (jnp.tanh(gn / G_max) / gn) * g_raw     # |g| <= Gmax (structural)
+        # LINEAR slew parameterization: the VARIABLE IS the slew (T/m/s), bounded per-axis by a
+        # simple box [-Smax, Smax] (the physical per-amplifier limit), so slew feasibility is
+        # exact & free (box bounds are enforced directly by SLSQP).  g = cumsum(slew)*dt is
+        # LINEAR in the variable -> the equalities stay as tractable as direct-g (no tanh
+        # squash).  Amplitude |g_k| <= Gmax is a separate per-axis LINEAR inequality.
+        slew_full = jnp.zeros((n_t, na)).at[full_idx].set(raw)   # raw = slew, slew=0 off-regions
+        return dt * jnp.cumsum(slew_full, axis=0)              # g(0)=0, linear in slew
     def qof(g):
         return GAMMA * jnp.cumsum(s * g, axis=0) * dt          # (n_t,na)
     def Bof(q):
@@ -140,6 +145,9 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         return jnp.concatenate([(cax - d).reshape(-1), (cax + d).reshape(-1)]) / slew_rate_max
     def amp_margin(x):
         g = gfull(x); return (G_max ** 2 - jnp.sum(g ** 2, 1)) / G_max ** 2             # ≥0
+    def amp_axis(x):                                          # per-axis |g_k| <= Gmax (LINEAR)
+        g = gfull(x)
+        return jnp.concatenate([(G_max - g).reshape(-1), (G_max + g).reshape(-1)]) / G_max
 
     # slew_mode='penalty': fold the slew overshoot into the OBJECTIVE (SLSQP minimizes it as
     # part of the cost, which it does reliably) instead of a hard inequality (which SLSQP
@@ -159,9 +167,10 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     if maxwell:        eqs.append(c_mxwl)
     if f_target > 0.0: eqs.append(c_spec)
     if slew_param:
-        # slew + amplitude are STRUCTURAL -> no slew/amp inequality; just pin g=0 at 180 & TE.
+        # slew = box-bounded variable (exact, free); amplitude = per-axis LINEAR ineq; pin g=0
+        # at 180 & TE.  All constraints linear or as-tractable-as-direct-g -> SLSQP-friendly.
         eqs += [c_g180, c_gTE]
-        ineqs = []
+        ineqs = [amp_axis]
     elif slew_mode == "penalty":
         ineqs = [amp_margin]
     else:
@@ -173,15 +182,17 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     else:
         cons = [{"type": "eq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in eqs]
         cons += [{"type": "ineq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in ineqs]
-        # slew_param: raw is unbounded (tanh caps slew); legacy: box on g samples.
-        bounds = None if slew_param else [(-G_max, G_max)] * (nf * na)
+        # slew_param: BOX-BOUND the slew variable to [-Smax,Smax] (per-axis slew, exact & free);
+        # legacy direct-g: box on g samples to [-Gmax,Gmax].
+        bnd = slew_rate_max if slew_param else G_max
+        bounds = [(-bnd, bnd)] * (nf * na)
 
     rng = np.random.default_rng(seed)
     edge = np.sin(np.linspace(0.0, np.pi, nf))                 # 0 at window edges
     def bipolar(fr):
         h = max(1, int(nf * fr)); return edge * np.concatenate([-np.ones(h), np.ones(nf - h)])
-    # init scale: slew_param raw is O(1) (tanh saturates ~2); legacy g-domain is ~G_max.
-    sc = 1.5 if slew_param else (G_max * 0.85 / np.sqrt(na))
+    # init scale: slew_param raw is the slew (~S_max); legacy g-domain is ~G_max.
+    sc = (slew_rate_max * 0.3) if slew_param else (G_max * 0.85 / np.sqrt(na))
     inits = []
     # structured: each axis a bipolar at a distinct split (distinct axes -> full-rank B for STE)
     for base_fr in (0.45, 0.5, 0.55, 0.6):
