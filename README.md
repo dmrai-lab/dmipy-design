@@ -49,6 +49,21 @@ dmipy_design/
     gradient_based.py       — gradient_oed: L-BFGS-B + JAX autodiff, single-shell PGSE
     multishell.py           — multishell_oed: joint optimisation over multiple shells
     greedy_sequential.py    — greedy_add_measurement: add one measurement at a time (D-optimal gain)
+    now.py                  — design_waveform_now: the DESIGN ORACLE. NumPy+SciPy SQP, max-b gradient
+                              waveform at any b-tensor shape (LTE/PTE/STE/OGSE) with machine-precision
+                              constraints (slew/amp/M1/M2/shape/Maxwell/spectral/PNS-SAFE/heat)
+    timing.py               — SequenceTiming, encoding_spectrum (JAX-free, shared by both solvers)
+    waveform_designer.py    — design_waveform: JAX augmented-Lagrangian solver. Differentiable, kept as
+                              the simulator-in-the-loop CO-OPT engine (not a competing designer)
+    stimulated_echo.py      — design_stimulated_echo: PGSTE timing front-end (routes through NOW)
+```
+
+Hardware/safety limits (gradient max/slew/raster, RF peak-B1/raster, IEC SAR/PNS) come from
+the cited `dmipy_sim.sequences.scanner_constants` catalogue — the acquisition-side analogue of
+dmipy-sim's `biophysical_constants`. The `benchmarks/now_coopt_pipeline.py` pipeline warm-starts a
+differentiable-Bloch RF co-optimization from a NOW gradient (RF deliverability constraints applied).
+
+```
 tests/
   test_fim_traceability.py
   test_oed_optimizer.py

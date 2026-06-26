@@ -169,7 +169,43 @@ use `"b_values"` in dict encoders and `.bvalues` in `JaxScheme`.
 
 ---
 
-## Tensor-valued waveform designer (`optimizers/waveform_designer.py`)
+## Waveform design — NOW (design oracle) + AL (co-opt engine)
+
+There are **two** gradient-waveform solvers, doing different jobs. Don't treat them as
+competing designers:
+
+- **NOW — `optimizers/now.py::design_waveform_now` — the DESIGN ORACLE.** A NumPy+SciPy
+  port of NOW's own recipe (Sjölund 2015; jsjol/NOW): maximize `b = gᵀQg` with
+  active-set SQP (scipy SLSQP), constraints expressed the way NOW expresses them —
+  LINEAR matrices (per-axis slew, refocus `q(TE)=0`, moments M1/M2), amplitude as box
+  bounds, nonlinear b-tensor SHAPE + Maxwell + OGSE-spectral, with **analytic** objective
+  + constraint Jacobians (NO autodiff). All shapes in one solver (LTE/PTE/STE; OGSE via
+  `spectral_freq`), and the **full deliverability set**: slew / amplitude / M1 / M2 /
+  shape / Maxwell / spectral / **PNS (SAFE model)** / **heat (∫g²)**. It gets the *best b*
+  with machine-precision constraints because SQP handles them exactly (the objective is
+  never dwarfed). Returns a `NowDesign` with `.effective_G()` / `.to_sim_waveform()`.
+  **This is the default designer — use it.** Why NumPy+SciPy and not JAX: active-set SQP
+  is sequential/combinatorial (bad for vmap/autodiff), and feeding scipy a JAX-autodiff
+  objective crosses a per-iteration numpy↔JAX bridge that dominates wall-clock (minutes).
+  Pure-numpy-analytic derivatives → scipy calls NumPy directly (LTE ~1 s). The lesson:
+  for scipy problems go fully numpy-analytic OR fully end-to-end-JAX; never scipy-over-autodiff.
+
+- **AL — `optimizers/waveform_designer.py::design_waveform` — the CO-OPT ENGINE.** The
+  JAX augmented-Lagrangian solver. NOW supersedes it as a *b-maximizer* (exact constraints,
+  best b), so it is **kept for what only it can do**: it is end-to-end differentiable, the
+  substrate for simulator-in-the-loop **co-optimization** (RF + gradient through a
+  differentiable Bloch). It is NOT a competing designer; reach for it when you need to
+  backprop through the forward model, not to design a max-b waveform.
+
+Shared, solver-agnostic pieces (`SequenceTiming`, `encoding_spectrum`) live in the
+JAX-free `optimizers/timing.py`, so NOW doesn't import the JAX module. Hardware/safety
+limits come from the **cited `dmipy_sim.sequences.scanner_constants` catalogue** (the
+acquisition-side analogue of `biophysical_constants`) — `gradient_limits(model, regime=)`,
+`get_limit(..., si=True)`, `sar_limit(...)`. Don't hard-code G_max/slew/peak-B1/SAR; read
+them from there (and note `regime='diffusion'` gives the PNS-derated slew, e.g. Connectom
+200→62.5 T/m/s).
+
+### The AL designer (now the co-opt engine) — physics still applies
 
 `design_waveform(b_delta, ...)` optimizes a hardware-realizable physical gradient
 `g(t)` with a finite-180 spin echo built in, achieving any target b-tensor shape
@@ -177,7 +213,8 @@ use `"b_values"` in dict encoders and `.bvalues` in `JaxScheme`.
 (G_max=0.08, slew=200, TE).  The 180 is intrinsic — the sign flip enters `q(t)`,
 so refocusing `q(TE)=0` is part of the optimization (an effective-only waveform
 with no 180 cannot refocus a static field).  `design.to_sim_waveform()` hands the
-gradient to the dmipy-sim forward / mc_bridge.
+gradient to the dmipy-sim forward / mc_bridge.  (All the robustness/timing/spectral
+rules below apply equally to NOW, which enforces the same constraints exactly.)
 
 **Robustness constraints — ON by default**, opt out per flag: `null_M1`
 (velocity, ∫t·g_eff=0), `null_M2` (acceleration, ∫t²·g_eff=0), `maxwell`
@@ -247,6 +284,36 @@ for static refocus (the PGSTE analog of 180@TE/2).  `design_stimulated_echo` wra
 diffusion time; static field is immune during TM.  Done as groundwork; NOT yet:
 GPU validation of the encodings + a dmipy-sim 3×90 *playback* builder (the spin-echo
 `from_btensor_waveform` correctly refuses a PGSTE design via the off-centre guard).
+
+## RF + gradient co-optimization (`benchmarks/now_coopt_pipeline.py`)
+
+The "best of both worlds" pipeline: **NOW designs the constraint-optimal gradient
+(Stage 1)**, then a **differentiable-Bloch JAX co-opt refines the 180 RF over a
+(B1⁺ × off-resonance) ensemble on that exact gradient (Stage 2)** — the spin-physics
+robustness NOW's closed-form, ideal-hard-pulse `b`/refocus cannot see. The design solve
+(max b) wants active-set SQP and does NOT need to be differentiable; what must be
+differentiable is the *Bloch forward model*, not the design solver. So the architecture
+is a pipeline (NOW warm-starts the co-opt), not one merged solver.
+
+**RF deliverability** is the RF analogue of the gradient constraints, and it must be
+enforced or the optimizer produces an undeliverable pulse (huge RF slew, 0↔π phase jumps,
+unbounded SAR). The co-opt enforces: band-limited envelope (cosine basis → bounds RF
+slew/bandwidth structurally), peak-B1 penalty (↔ amplitude box), SAR `∫B1²` penalty
+(↔ heat). Limits come from the scanner_constants catalogue. NOTE: there is **no
+authoritative RF-deliverability checker to delegate to** — pulseq carries RF *timing/raster*
+(`rf_raster_time` 1 µs, `rf_dead_time`, `rf_ringdown_time`) and gradient PNS, but **no
+peak-B1 cap and no SAR** (its `SAR_calc` is a deprecated placeholder). Peak-B1 is a vendor
+number (coil/patient-dependent), SAR/B1⁺rms are IEC 60601-2-33 (patient-mass-dependent),
+enforced by the scanner's runtime supervision. So RF deliverability is encoded here, not
+looked up.
+
+CAVEAT (current state, do not overclaim): the co-opt's forward is still a **toy
+single-vector Bloch** with analytic `exp(-bD)` diffusion over a coarse (B1, off-res) grid,
+and only the **180** is optimized. The real version uses `dmipy_sim.trajectories.
+apply_waveform_bloch[_jax]` over cached white-matter walker trajectories with the 90 AND
+180 as `rf_events` — the differentiable MC over real spins. The spacing IS already real:
+`Sequence.from_btensor_waveform(design.effective_G(), dt, echo_idx=…)` builds the spin echo
+and enforces 180-at-TE/2 (off-centre guarded).
 
 NB: the small (3×3) b-tensor contraction must be an explicit outer-product sum,
 not `einsum`/matmul — the matmul triggers an XLA "too small divisible part of the
