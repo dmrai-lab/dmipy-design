@@ -48,7 +48,7 @@ def _rank_of(b_delta):
 def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.060,
                         n_t=200, timing, null_M1=True, null_M2=True, maxwell=True,
                         spectral_freq=None, n_restarts=16, seed=0, maxiter=400, init_g=None,
-                        method="slsqp", slew_mode="vector"):
+                        method="slsqp", slew_mode="vector", slew_param=False):
     """NOW-style direct-g + SLSQP design for LTE/PTE/STE (+OGSE).  Returns a dict with G
     (n_t,3), b_value, the constraint indices, and feasibility."""
     if not _OK:
@@ -75,8 +75,27 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     bscale = (GAMMA * G_max) ** 2 * TE ** 3 / 50.0
     iu = np.triu_indices(na)                                   # Maxwell upper-triangle (static)
 
-    def gfull(x):                                              # x (nf*na,) -> g (n_t,na), off=0
-        return jnp.zeros((n_t, na)).at[full_idx].set(x.reshape(nf, na))
+    # slew_param: mirror the AL designer's structural squash so SLEW and AMPLITUDE are bounded
+    # BY CONSTRUCTION (slew=Smax*tanh(|raw|)/|raw|*raw, g=cumsum(slew)*dt, g=Gmax*tanh(|g|/Gmax)*ĝ),
+    # removing the slew/amp inequalities entirely.  EMPIRICAL FINDING: this DOES make slew
+    # structural (slew<=Smax for all ranks), BUT with SLSQP the now-squashed EQUALITIES
+    # (refoc/shape/moments) are left unsatisfied (LTE refoc->1, b->unconstrained max) -- the
+    # active-set SQP can't drive the nonlinear-through-the-squash equalities.  Driving them needs
+    # an augmented-Lagrangian / penalty method -- which is exactly the AL designer
+    # (waveform_designer.design_waveform), the SINGLE solver that already does LTE/PTE/STE/OGSE
+    # via this same structural slew.  So: AL = unified all-shape solver; this SQP (slew_param=
+    # False, direct-g) = single-axis specialist (LTE/OGSE, cleaner + beats AL there).
+    nvar = (nf if slew_param else nf) * na                     # both parameterize the free samples
+    def gfull(x):                                              # x (nf*na,) -> g (n_t,na)
+        raw = x.reshape(nf, na)
+        if not slew_param:
+            return jnp.zeros((n_t, na)).at[full_idx].set(raw)  # legacy direct-g (off=0)
+        rn = jnp.sqrt(jnp.sum(raw ** 2, axis=1, keepdims=True) + 1e-12)
+        slew = slew_rate_max * (jnp.tanh(rn) / rn) * raw       # |slew| <= Smax (structural)
+        slew_full = jnp.zeros((n_t, na)).at[full_idx].set(slew)   # slew=0 in off-regions
+        g_raw = dt * jnp.cumsum(slew_full, axis=0)             # g(0)=0
+        gn = jnp.sqrt(jnp.sum(g_raw ** 2, axis=1, keepdims=True) + 1e-12)
+        return G_max * (jnp.tanh(gn / G_max) / gn) * g_raw     # |g| <= Gmax (structural)
     def qof(g):
         return GAMMA * jnp.cumsum(s * g, axis=0) * dt          # (n_t,na)
     def Bof(q):
@@ -88,7 +107,8 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     def c_refoc(x):
         return qof(gfull(x))[-1] / qscale                      # (na,)  q(TE)=0, normalized
     def c_shape(x):
-        B = Bof(qof(gfull(x))); w = jnp.linalg.eigvalsh(B)
+        B = Bof(qof(gfull(x)))
+        w = jnp.linalg.eigvalsh(B + 1e-9 * jnp.trace(B) * jnp.eye(na))   # jitter: avoid eig non-conv
         return jnp.array([jnp.sum((w - jnp.mean(w)) ** 2) / (jnp.trace(B) ** 2 + 1e-30)])
     def c_m1(x):
         g = gfull(x); return jnp.sum(t * s * g, 0) * dt / (G_max * TE ** 2)        # (na,)
@@ -102,6 +122,11 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         g = gfull(x); q = qof(g)
         frms = jnp.sqrt(GAMMA ** 2 * jnp.sum(g ** 2) / (jnp.sum(q ** 2) + 1e-30)) / (2 * np.pi)
         return jnp.array([(frms - f_target) / (f_target + 1e-9)])
+    # slew_param holds g constant through the off-regions (slew=0 there), so require g=0 at
+    # the 180 (clean sign flip; g held there = g[echo]) and at TE -> each lobe ramps 0->0
+    # within its window (the standard spin-echo structure).
+    def c_g180(x):  return gfull(x)[int(echo)] / G_max          # (na,)  g=0 during the 180
+    def c_gTE(x):   return gfull(x)[-1] / G_max                 # (na,)  g(TE)=0
     def slew_margin(x):                                       # vector-norm (nonlinear)
         d = jnp.diff(gfull(x), axis=0) / dt
         return (slew_rate_max - jnp.sqrt(jnp.sum(d ** 2, 1) + 1e-30)) / slew_rate_max   # ≥0
@@ -125,7 +150,7 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         return negb(x) + 50.0 * jnp.sum(jnp.maximum(sl / slew_rate_max - 1.0, 0.0) ** 2)
 
     jit = jax.jit
-    obj = negb_pen if slew_mode == "penalty" else negb
+    obj = negb_pen if (slew_mode == "penalty" and not slew_param) else negb
     f_val, f_jac = jit(obj), jit(jax.grad(obj))
     eqs = [c_refoc]
     if na >= 2:        eqs.append(c_shape)
@@ -133,38 +158,43 @@ def design_waveform_sqp(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     if null_M2:        eqs.append(c_m2)
     if maxwell:        eqs.append(c_mxwl)
     if f_target > 0.0: eqs.append(c_spec)
-    ineqs = ([amp_margin] if slew_mode == "penalty"
-             else [slew_margin_axis if slew_mode == "per_axis" else slew_margin, amp_margin])
+    if slew_param:
+        # slew + amplitude are STRUCTURAL -> no slew/amp inequality; just pin g=0 at 180 & TE.
+        eqs += [c_g180, c_gTE]
+        ineqs = []
+    elif slew_mode == "penalty":
+        ineqs = [amp_margin]
+    else:
+        ineqs = [slew_margin_axis if slew_mode == "per_axis" else slew_margin, amp_margin]
     if method == "trust-constr":
-        # interior-point: handles the many vector-slew inequalities far better than SLSQP's
-        # active-set (which satisfies equalities first and leaves the slew ineq loose for
-        # multi-axis).  eq: lb=ub=0; ineq: lb=0, ub=inf.
         cons = ([NonlinearConstraint(jit(fn), 0.0, 0.0, jac=jit(jax.jacfwd(fn))) for fn in eqs]
                 + [NonlinearConstraint(jit(fn), 0.0, np.inf, jac=jit(jax.jacfwd(fn))) for fn in ineqs])
-        bounds = Bounds(-G_max, G_max)
+        bounds = None
     else:
         cons = [{"type": "eq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in eqs]
         cons += [{"type": "ineq", "fun": jit(fn), "jac": jit(jax.jacfwd(fn))} for fn in ineqs]
-        bounds = [(-G_max, G_max)] * (nf * na)                 # loose per-component box
+        # slew_param: raw is unbounded (tanh caps slew); legacy: box on g samples.
+        bounds = None if slew_param else [(-G_max, G_max)] * (nf * na)
 
     rng = np.random.default_rng(seed)
     edge = np.sin(np.linspace(0.0, np.pi, nf))                 # 0 at window edges
     def bipolar(fr):
         h = max(1, int(nf * fr)); return edge * np.concatenate([-np.ones(h), np.ones(nf - h)])
-    amp_fac = 0.85 / np.sqrt(na)                               # keep |g(t)| ≲ G_max at init
+    # init scale: slew_param raw is O(1) (tanh saturates ~2); legacy g-domain is ~G_max.
+    sc = 1.5 if slew_param else (G_max * 0.85 / np.sqrt(na))
     inits = []
     # structured: each axis a bipolar at a distinct split (distinct axes -> full-rank B for STE)
     for base_fr in (0.45, 0.5, 0.55, 0.6):
         x = np.zeros((nf, na))
         for k in range(na):
-            x[:, k] = bipolar(min(0.75, base_fr + 0.07 * k)) * G_max * amp_fac
+            x[:, k] = bipolar(min(0.75, base_fr + 0.07 * k)) * sc
         inits.append(x.reshape(-1))
     for _ in range(max(0, n_restarts - len(inits))):           # low-frequency random per axis
         x = np.zeros((nf, na))
         for k in range(na):
             kk = int(rng.integers(1, 4)); ph = rng.uniform(0, np.pi, kk); am = rng.uniform(0.4, 1.0, kk)
             v = sum(a * np.sin((j + 1) * np.linspace(0, np.pi, nf) + p) for j, (a, p) in enumerate(zip(am, ph)))
-            x[:, k] = edge * v / (np.max(np.abs(v)) + 1e-9) * G_max * amp_fac
+            x[:, k] = edge * v / (np.max(np.abs(v)) + 1e-9) * sc
         inits.append(x.reshape(-1))
     if init_g is not None:
         ig = np.asarray(init_g, float)
