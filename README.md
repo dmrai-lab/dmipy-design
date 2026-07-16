@@ -64,6 +64,21 @@ from dmipy_design import design_stimulated_echo
 pgste = design_stimulated_echo(b_delta=1.0, TM=50e-3, TE=0.12)
 ```
 
+### Two modes: max-b at a fixed TE, or min-TE for a target b (SNR-optimal)
+
+`design_waveform_now` maximises b at a **fixed TE**. The mirror image — given a *required*
+b-value, find the **shortest TE** that still reaches it — is the SNR-optimal design (shorter TE
+⇒ less T2 decay before the echo). Because achievable b is monotonic in TE, `min_te_for_b`
+bisects TE around the same max-b primitive:
+
+```python
+from dmipy_design import min_te_for_b, SequenceTiming
+
+timing = SequenceTiming(t_excite=3e-3, t_refocus=6e-3, t_readout_pre_echo=14e-3)
+design, te = min_te_for_b(b_target=1e9, b_delta=1.0, timing=timing)  # 1000 s/mm²
+print(f"shortest TE = {te*1e3:.1f} ms, b = {design.b_value:.2e}")
+```
+
 Export to a scanner-runnable `.seq` (needs `[pulseq]`):
 
 ```python

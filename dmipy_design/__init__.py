@@ -7,6 +7,9 @@ Design deliverable gradient waveforms for diffusion MRI under real scanner limit
   direct gradient waveform for any b-tensor shape (LTE / PTE / STE, and OGSE via a spectral
   constraint) under the full deliverability set (slew / amplitude / M1 / M2 / Maxwell /
   spectral / PNS-SAFE / heat), with machine-precision constraints.
+- **min-TE** (``min_te_for_b``) — the SNR-optimal inverse: given a *required* b-value, find
+  the shortest TE that still reaches it (shorter TE ⇒ less T2 decay ⇒ higher SNR), by
+  bisecting TE around the NOW max-b primitive.
 - **PGSTE** (``design_stimulated_echo``) — stimulated-echo diffusion encoding through the
   same NOW core (matched τ₁ = τ₃ periods around a long, T1-limited mixing time).
 - **Timing** (``SequenceTiming``) — the physical encoding-window budget; the pre/post-180
@@ -25,6 +28,7 @@ from .optimizers import (
     encoding_spectrum,
     design_waveform_now,
     NowDesign,
+    min_te_for_b,
     StimulatedEchoTiming,
     design_stimulated_echo,
 )
@@ -36,6 +40,7 @@ __all__ = [
     "encoding_spectrum",
     "design_waveform_now",
     "NowDesign",
+    "min_te_for_b",
     "StimulatedEchoTiming",
     "design_stimulated_echo",
 ]
