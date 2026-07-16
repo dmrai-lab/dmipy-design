@@ -7,6 +7,7 @@
 """
 from .timing import SequenceTiming, encoding_spectrum
 from .now import design_waveform_now, NowDesign
+from .min_te import min_te_for_b
 from .stimulated_echo import StimulatedEchoTiming, design_stimulated_echo
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "encoding_spectrum",
     "design_waveform_now",
     "NowDesign",
+    "min_te_for_b",
     "StimulatedEchoTiming",
     "design_stimulated_echo",
 ]

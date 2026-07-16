@@ -32,6 +32,12 @@ shapes: **LTE / PTE / STE** (`b_delta = 1 / -0.5 / 0`), and **OGSE** via `spectr
 deliverability set: slew / amplitude / M1 / M2 / shape / Maxwell / spectral / **PNS (SAFE)** /
 **heat (∫g²)**. Returns a `NowDesign` with `.effective_G()` / `.to_sim_waveform()`.
 
+**Two modes.** `design_waveform_now` maximises b at a **fixed TE**. The inverse —
+`min_te_for_b` (`optimizers/min_te.py`) — gives a *required* b-value the **shortest TE** that
+reaches it (the SNR-optimal design: shorter TE ⇒ less T2 decay). It is a thin wrapper that
+**bisects TE around the same max-b primitive** (achievable b is monotonic in TE); it does not
+add a second solver. Returns `(NowDesign, te)`.
+
 **Why NumPy + SciPy, not JAX:** active-set SQP is sequential (bad for vmap/autodiff), and feeding
 scipy a JAX-autodiff objective crosses a per-iteration numpy↔JAX bridge that dominates wall-clock.
 Pure-numpy-analytic derivatives → scipy calls NumPy directly (LTE ~1 s). For scipy problems go
@@ -84,6 +90,7 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 | File | Role |
 |------|------|
 | `optimizers/now.py` | `design_waveform_now`, `NowDesign` — the SQP design oracle (LTE/PTE/STE/OGSE) |
+| `optimizers/min_te.py` | `min_te_for_b` — shortest TE for a target b (SNR-optimal), bisecting NOW |
 | `optimizers/timing.py` | `SequenceTiming` (asymmetric windows), `encoding_spectrum` — NumPy-only, JAX-free |
 | `optimizers/stimulated_echo.py` | `StimulatedEchoTiming`, `design_stimulated_echo` — PGSTE via NOW |
 | `pulseq_export.py` | `.seq` export + delivery/PNS reports (needs `[pulseq]`) |
