@@ -1,0 +1,35 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+env:
+  # NOW is many tiny SciPy SLSQP solves; single-threaded BLAS avoids thread-oversubscription.
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+jobs:
+  core:
+    # NOW / timing / PGSTE — NumPy + SciPy only, fast feedback
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[dev]"
+      - run: pytest -q -m "not slow"
+
+  pulseq:
+    # scanner-runnable .seq export round-trip — pulls dmipy-sim + pypulseq
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[pulseq,dev]"
+      - run: pytest -q tests/test_pulseq_export.py
