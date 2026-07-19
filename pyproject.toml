@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dmipy-design"
-version = "0.1.0"
+version = "2.0.0"
 description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE), Pulseq I/O, and scanner constraints — instant-pulse public scope"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,8 @@ dependencies = [
 sim = ["dmipy-sim>=2.1,<3"]
 # scanner-runnable .seq export + offline delivery/PNS checks
 pulseq = ["dmipy-sim>=2.1,<3", "pypulseq>=1.4"]
+# cross-package interoperability tests: a designed waveform -> dmipy-sim -> dmipy-fit
+interop = ["dmipy-sim>=2.1,<3", "dmipy-fit>=2.1,<3"]
 dev = ["pytest>=7", "pytest-cov"]
 
 [project.urls]
