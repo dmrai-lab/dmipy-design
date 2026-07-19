@@ -37,7 +37,8 @@ jobs:
 
   interop:
     # cross-package: a designed waveform -> dmipy-sim simulates -> dmipy-fit recovers it.
-    # Pulls the published dmipy-sim + dmipy-fit, so it runs even while this repo is private.
+    # Pulls the published dmipy-sim + dmipy-fit — also guards against interface drift as they
+    # release independently.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
