@@ -8,6 +8,7 @@ env:
   OMP_NUM_THREADS: "1"
   OPENBLAS_NUM_THREADS: "1"
   MKL_NUM_THREADS: "1"
+  JAX_PLATFORMS: cpu   # dmipy-sim/fit pull JAX; CI is CPU-only
 jobs:
   core:
     # NOW / timing / PGSTE — NumPy + SciPy only, fast feedback
@@ -33,3 +34,15 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[pulseq,dev]"
       - run: pytest -q tests/test_pulseq_export.py
+
+  interop:
+    # cross-package: a designed waveform -> dmipy-sim simulates -> dmipy-fit recovers it.
+    # Pulls the published dmipy-sim + dmipy-fit, so it runs even while this repo is private.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[interop,dev]" "jax[cpu]"
+      - run: pytest -q tests/test_interop.py
