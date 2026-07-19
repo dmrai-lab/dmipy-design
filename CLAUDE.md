@@ -20,7 +20,8 @@ Pulseq.
 - CRLB / Fisher-information optimal experiment design.
 - Column-generation multishell protocol design.
 
-Do not add any of the above here. (They live in the private counterpart repo.)
+Do not add any of the above here — this package is deliberately scoped to the instant-pulse,
+deliverable-waveform layer.
 
 ## NOW is the design oracle — use it
 
