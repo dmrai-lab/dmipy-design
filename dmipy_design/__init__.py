@@ -45,4 +45,8 @@ __all__ = [
     "design_stimulated_echo",
 ]
 
-__version__ = "0.1.0"
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("dmipy-design")
+except Exception:   # not installed (e.g. run from a source tree)
+    __version__ = "unknown"

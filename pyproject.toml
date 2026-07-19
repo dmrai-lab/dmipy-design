@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dmipy-design"
-version = "2.0.0"
+version = "2.0.1"
 description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE), Pulseq I/O, and scanner constraints — instant-pulse public scope"
 readme = "README.md"
 requires-python = ">=3.10"
