@@ -185,6 +185,7 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
                          b1_range=(0.7, 1.3), n_b1=7,
                          off_resonance_hz=250.0, n_off_resonance=7,
                          mu_range=(0.7, 6.0), n_mu=18,
+                         warm_start=None,
                          refine=True, n_refine_basis=8, refine_maxiter=200) -> RfPulseDesign:
     """Design a B1-robust hyperbolic-secant adiabatic refocusing pulse.
 
@@ -212,7 +213,12 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
     off_resonance_hz, n_off_resonance : float, int
         Off-resonance ensemble (the pulse's sweep bandwidth must cover it).
     mu_range, n_mu : tuple, int
-        Search range and grid density for the sweep parameter ``μ``.
+        Search range and grid density for the sweep parameter ``μ`` (ignored if ``warm_start``).
+    warm_start : B1Pulse or complex ndarray, optional
+        Initial pulse to refine instead of the built-in HS — e.g. a dmipy-sim
+        ``B1Pulse.adiabatic_hs`` / ``bir4`` / ``composite`` (or its ``.b1`` array). Resampled to
+        this raster if the length differs. When given, ``mu``/``bandwidth_hz`` are reported as NaN
+        (no HS backbone).
     refine : bool
         Run the GRAPE-style optimal-control refinement from the HS warm start (default True).
     n_refine_basis, refine_maxiter : int
@@ -242,19 +248,29 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
         A0_sar = np.sqrt(sar_budget / (np.sum(sech2) * dt))
         A0 = min(A0, A0_sar)
 
-    # choose the sweep μ that maximises ensemble refocusing efficiency (grid + local refine)
-    def neg_eff(mu):
-        return -_efficiency(_hs_envelope(A0, mu, beta, n_rf), b1_scale, dw, dt)
+    if warm_start is not None:
+        # start from a caller-supplied pulse (e.g. a dmipy-sim B1Pulse: adiabatic_hs, bir4,
+        # composite) instead of the built-in HS; resample to this raster if needed.
+        ws = np.asarray(getattr(warm_start, "b1", warm_start), dtype=np.complex128).ravel()
+        if ws.shape[0] != n_rf:
+            xi = np.linspace(0.0, 1.0, ws.shape[0]); xo = np.linspace(0.0, 1.0, n_rf)
+            ws = np.interp(xo, xi, ws.real) + 1j * np.interp(xo, xi, ws.imag)
+        b1c = ws
+        mu = float("nan")                       # not an HS backbone
+    else:
+        # choose the sweep μ that maximises ensemble refocusing efficiency (grid + local refine)
+        def neg_eff(mu):
+            return -_efficiency(_hs_envelope(A0, mu, beta, n_rf), b1_scale, dw, dt)
 
-    mus = np.linspace(mu_range[0], mu_range[1], n_mu)
-    grid = [neg_eff(m) for m in mus]
-    j = int(np.argmin(grid))
-    lo = mus[max(0, j - 1)]; hi = mus[min(len(mus) - 1, j + 1)]
-    res = minimize_scalar(neg_eff, bounds=(lo, hi), method="bounded",
-                          options={"xatol": 1e-3})
-    mu = float(res.x) if -res.fun >= -grid[j] else float(mus[j])
+        mus = np.linspace(mu_range[0], mu_range[1], n_mu)
+        grid = [neg_eff(m) for m in mus]
+        j = int(np.argmin(grid))
+        lo = mus[max(0, j - 1)]; hi = mus[min(len(mus) - 1, j + 1)]
+        res = minimize_scalar(neg_eff, bounds=(lo, hi), method="bounded",
+                              options={"xatol": 1e-3})
+        mu = float(res.x) if -res.fun >= -grid[j] else float(mus[j])
+        b1c = _hs_envelope(A0, mu, beta, n_rf)
 
-    b1c = _hs_envelope(A0, mu, beta, n_rf)
     eff = _efficiency(b1c, b1_scale, dw, dt)
 
     # ── stage 2: GRAPE-style refinement from the HS warm start ──────────────────
