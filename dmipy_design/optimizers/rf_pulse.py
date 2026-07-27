@@ -1,93 +1,98 @@
-"""Deliverable, B1-robust refocusing-RF (180°) design via a Bloch forward.
+"""Deliverable, B1-robust refocusing RF: adiabatic (hyperbolic-secant) pulse design.
 
-Design the *B1 envelope* of a spin-echo refocusing pulse so that it refocuses across a
-realistic operating ensemble — transmit-field inhomogeneity (B1⁺ scale) × static
-off-resonance (B0 / susceptibility) — while staying scanner-deliverable.  This is the RF
-analogue of what ``design_waveform_now`` does for the diffusion *gradient*: maximise a physical
-objective under the real hardware box, evaluated through the Bloch equation itself.
+A hard 180° is exactly π only where the transmit field is nominal; across a head $B_1^+$
+varies by tens of percent, so off-nominal spins under/over-flip and the spin echo built on them
+loses signal.  The standard, scanner-deliverable fix is an **adiabatic pulse**: sweep the RF
+frequency slowly through resonance while the amplitude rises and falls, and — provided the
+sweep is slow enough (the *adiabatic condition*) — the magnetisation **follows the effective
+field** from +z to −z regardless of the exact $B_1^+$.  That is what makes it B1-robust, and its
+trajectory is a smooth spiral down the Bloch sphere, not a delicate balance of flip angles.
 
-**Objective — per-spin refocusing fidelity.**  A refocusing pulse should act as a true 180°
-rotation for every spin, regardless of the transmit strength or off-resonance it happens to
-see.  The figure of merit is the crushed spin-echo **refocusing efficiency**
+This module designs the classic **hyperbolic-secant (HS) adiabatic full passage** (Silver,
+Joseph & Hoult 1985), the complex envelope
 
-    η = (1 − M_z) / 2   ∈ [0, 1]      (M_z = the pulse acting on +z; η = |β|² in SLR terms)
+    B1(t) = A0 · sech(β τ)^(1 + i μ),      τ = 2t/T − 1 ∈ [−1, 1]
 
-which is 1 for a perfect 180° (M_z → −1) and 0 for no rotation.  The objective is the **mean of
-η over the ensemble** — a per-spin scalar, so (unlike a coherent-sum metric) it cannot be gamed
-by cross-spin phase cancellation: every spin must genuinely invert.
+— amplitude ``A0 sech(βτ)`` and a tanh frequency sweep of half-bandwidth ``μβ/(πT)``.  ``A0`` is
+the peak amplitude (the deliverable knob, capped at ``B1_max``), ``β`` sets the truncation, and
+``μ`` sets the sweep bandwidth / adiabaticity.  The design chooses ``μ`` (and, under a SAR cap,
+``A0``) to maximise the ensemble **refocusing efficiency** through the Bloch equation.
 
-**Variable — a band-limited COMPLEX envelope.**  A real hard 180° gives the wrong flip to any
-spin with B1⁺ ≠ 1; robust refocusing needs amplitude *and phase* structure (like a composite or
-adiabatic pulse).  The optimisation variable is therefore a complex envelope built from a few
-low-frequency cosine (DCT-II) coefficients per quadrature — band-limited, so the RF slew /
-bandwidth stay bounded structurally.
+**Objective — per-spin refocusing fidelity.**  The figure of merit is the crushed spin-echo
+refocusing efficiency ``η = (1 − M_z)/2 ∈ [0,1]`` (M_z = the pulse acting on +z; η = |β|² in
+Shinnar–Le-Roux terms), averaged over the ``(B1⁺ scale × off-resonance)`` ensemble.  It is 1
+when every spin is genuinely inverted; being a per-spin scalar it cannot be gamed by cross-spin
+phase cancellation.
 
-**Deliverability box.**  ``peak |B1| ≤ B1_max`` is the hard hardware limit (always enforced as
-a penalty).  RF *energy* — the SAR proxy ``∫|B1|²dt`` — is the price of robustness: a genuinely
-robust 180° costs several× the energy of a minimal hard 180°.  ``sar_headroom`` optionally caps
-it (as a multiple of the hard-180° energy); left ``None`` the design is peak-limited (maximally
-robust) and simply *reports* the SAR it spent, so you can see the trade.
+**Deliverability.**  ``peak |B1| = A0 ≤ B1_max`` is the hard hardware limit.  Adiabatic pulses
+are power-hungry (they spend well over the energy of a minimal hard 180° — that is the price of
+following the field robustly); ``sar_headroom`` optionally caps the SAR proxy ``∫|B1|²dt`` as a
+multiple of the hard-180° energy by lowering ``A0``.
 
-Needs only NumPy + SciPy.  Hardware limits (``B1_max``) are plain arguments; source them from
-the dmipy-sim scanner catalogue (the ``[sim]`` extra) if you have it.
+Needs only NumPy + SciPy.  ``d.to_b1pulse()`` hands the design to dmipy-sim's Bloch forward.
 
-NOTE — original NumPy/SciPy implementation for dmipy-design.  Optimising an RF envelope through
-a Bloch / optimal-control forward is an established technique (optimal-control RF design, Conolly
-et al. 1986; GRAPE, Khaneja et al. 2005); the band-limited + peak-B1 + SAR recipe and the
-crushed-echo refocusing objective here are our formulation, not lifted from an external library.
+NOTE — adiabatic *full passage* imparts a $B_0/B_1$-dependent phase, so as a **refocusing** pulse
+it is used as a matched **pair** (double adiabatic refocusing, e.g. LASER) to cancel that phase;
+the crushed-echo η here is the single-pass ``|β|²`` refocusing coefficient.  References:
+Silver, Joseph & Hoult, *Phys. Rev. A* **31** (1985) 2753; Tannús & Garwood, *NMR Biomed.* **10**
+(1997) 423 (review); Kupče & Freeman, *J. Magn. Reson. A* **115** (1995) 273 (offset-independent
+adiabaticity).
 """
 from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
-from scipy.optimize import minimize
+from scipy.optimize import minimize_scalar
 
 GAMMA = 2.675e8   # rad/s/T, proton gyromagnetic ratio (matches HardwareConstraints)
 
 
 @dataclass
 class RfPulseDesign:
-    """Result of :func:`design_refocusing_rf`.
+    """Result of :func:`design_refocusing_rf` — a hyperbolic-secant adiabatic pulse.
 
     Attributes
     ----------
     B1 : np.ndarray (complex)
-        Optimised RF B1 envelope over the pulse, in Tesla (length ``n_rf``). Complex: the
-        magnitude is |B1(t)|, the argument is the transmit phase.
+        RF B1 envelope over the pulse, in Tesla (length ``n_rf``); |B1| is the amplitude, the
+        argument is the swept transmit phase.
     dt : float
         RF raster (s).
     rf_duration : float
-        Pulse duration (s) = ``n_rf * dt``.
+        Pulse duration (s).
+    mu : float
+        HS sweep / adiabaticity parameter (dimensionless).
+    beta : float
+        HS truncation parameter (``sech(β)`` at the pulse edges).
+    bandwidth_hz : float
+        Frequency-sweep bandwidth ``2μβ/(πT)`` (Hz) — the inversion band.
     refocusing_efficiency : float
-        Ensemble-mean crushed-echo refocusing efficiency η = ⟨(1−M_z)/2⟩ (0–1) of the design.
+        Ensemble-mean crushed-echo refocusing efficiency η = ⟨(1−M_z)/2⟩ (0–1).
     refocusing_efficiency_hard : float
-        Same metric for a plain hard (flat) 180° over the window — the baseline.
-    nominal_flip_deg : float
-        Integrated on-resonance nutation γ∫|B1|dt at B1⁺=1 (deg); ≈180 for a simple pulse,
-        more for a multi-lobe robust pulse.
+        Same metric for a plain hard 180° over the window — the baseline.
     peak_B1 : float
-        Peak |B1| of the designed pulse (T).
+        Peak |B1| = A0 (T).
     sar_proxy : float
-        SAR proxy ``∫|B1|²dt`` of the designed pulse (T²·s).
+        SAR proxy ``∫|B1|²dt`` (T²·s).
     sar_ratio : float
-        ``sar_proxy`` as a multiple of a plain hard-180° over the same window (the cost of
-        robustness).
+        ``sar_proxy`` as a multiple of a plain hard-180° over the same window.
     max_rf_slew : float
-        Peak |dB1/dt| of the designed pulse (T/s).
+        Peak |dB1/dt| (T/s).
     B1_max : float
         Peak-B1 limit used (T).
-    sar_budget : float or None
-        SAR-proxy budget used (T²·s), or None if peak-limited.
+    sar_budget : float
+        SAR-proxy budget used (T²·s), or ``inf`` if peak-limited.
     feasible : bool
-        True if peak-B1 (and SAR, when budgeted) are within 2 % of their limits.
-    n_basis : int
-        Number of cosine-basis coefficients per quadrature.
+        True if the ensemble refocusing efficiency exceeds 0.9 (a robust adiabatic passage) and
+        peak-B1 / SAR are within their limits.
     """
     B1: np.ndarray
     dt: float
     rf_duration: float
+    mu: float
+    beta: float
+    bandwidth_hz: float
     refocusing_efficiency: float
     refocusing_efficiency_hard: float
-    nominal_flip_deg: float
     peak_B1: float
     sar_proxy: float
     sar_ratio: float
@@ -95,7 +100,6 @@ class RfPulseDesign:
     B1_max: float
     sar_budget: float
     feasible: bool
-    n_basis: int
 
     def times(self) -> np.ndarray:
         """Sample times of the RF envelope (s), centred at 0."""
@@ -105,20 +109,27 @@ class RfPulseDesign:
     def to_b1pulse(self, label="refocus"):
         """Build a dmipy-sim ``B1Pulse`` from the designed envelope (needs the ``[sim]`` extra).
 
-        The optimised complex ``B1`` array (Tesla) is the ground-truth transmit waveform, so the
-        designed pulse drops straight into dmipy-sim's Bloch forward / slice-profile — the RF
-        mirror of ``NowDesign.to_sim_waveform``.
+        The complex ``B1`` array (Tesla) is the ground-truth transmit waveform, so the pulse
+        drops straight into dmipy-sim's Bloch forward / slice-profile — the RF mirror of
+        ``NowDesign.to_sim_waveform``.
         """
         from dmipy_sim.rf import B1Pulse
         return B1Pulse(b1=self.B1.astype(np.complex128), dt=self.dt, label=label,
                        flip_deg=180.0)
 
 
+def _hs_envelope(A0, mu, beta, n):
+    """Hyperbolic-secant adiabatic envelope B1(t) = A0 sech(βτ)^(1+iμ), τ∈[−1,1] (complex, T)."""
+    tau = np.linspace(-1.0, 1.0, n)
+    sech = 1.0 / np.cosh(beta * tau)
+    return A0 * sech * np.exp(1j * mu * np.log(sech + 1e-300))
+
+
 # ── Bloch forward: net rotation of +z by a complex B1(t) over an ensemble ───────
 def _inversion_mz(b1c, b1_scale, dw, dt):
     """M_z after applying the complex pulse ``b1c`` (Tesla) to +z, per ensemble member.
 
-    Per-step rotation is the exact (Rodrigues) rotation about the effective field
+    Exact per-step (Rodrigues) rotation about the effective field
     ``(γ B1x b1_scale, γ B1y b1_scale, Δω) dt``.  No free precession — the crushed spin-echo
     refocusing efficiency ``(1−M_z)/2`` depends only on the pulse's net rotation.
     """
@@ -159,94 +170,83 @@ def _rf_metrics(b1c, dt):
 
 
 def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
-                         B1_max=20e-6, sar_headroom=None,
+                         B1_max=20e-6, sar_headroom=None, beta=5.3,
                          b1_range=(0.7, 1.3), n_b1=7,
                          off_resonance_hz=250.0, n_off_resonance=7,
-                         n_basis=10, peak_weight=80.0, sar_weight=50.0,
-                         n_restarts=8, maxiter=400, seed=0) -> RfPulseDesign:
-    """Design a B1-robust, deliverable 180° refocusing envelope.
+                         mu_range=(0.7, 6.0), n_mu=18) -> RfPulseDesign:
+    """Design a B1-robust hyperbolic-secant adiabatic refocusing pulse.
 
-    Maximise the ensemble-mean crushed-echo refocusing efficiency of a shaped, phase-modulated
-    180° over a (B1⁺ transmit scale × static off-resonance) ensemble, subject to a peak-B1 limit
-    (and optionally a SAR budget).  Returns an :class:`RfPulseDesign`.
+    Amplitude is set to the deliverable peak (``A0 = B1_max``, or lowered to meet ``sar_headroom``
+    — adiabaticity improves with amplitude), and the sweep parameter ``μ`` is chosen to maximise
+    the ensemble-mean refocusing efficiency ``η = ⟨(1−M_z)/2⟩`` over the ``(B1⁺ × off-resonance)``
+    ensemble, evaluated through the Bloch equation.  Returns an :class:`RfPulseDesign`.
 
     Parameters
     ----------
     rf_duration : float
-        Pulse duration (s).  With ``dt`` it sets the number of RF samples ``n_rf``.
+        Pulse duration (s).  Longer pulses are more adiabatic (more robust) but more $T_2$-costly.
     dt : float
         RF raster (s).
     B1_max : float
-        Peak-B1 limit (T).  E.g. GE SIGNA Premier body coil ≈ 19 µT.
+        Peak-B1 limit (T), e.g. GE SIGNA Premier body coil ≈ 19 µT.
     sar_headroom : float, optional
-        SAR budget as a multiple of the plain hard-180° energy.  ``None`` (default) is
-        peak-limited — the most robust pulse the coil can deliver, with the SAR it costs simply
-        reported.  A robust 180° typically costs several× the hard-180° energy.
+        SAR budget as a multiple of the hard-180° energy; lowers ``A0`` to fit.  ``None`` (default)
+        uses the full peak — the most adiabatic (robust) pulse — and reports the SAR it costs.
+    beta : float
+        HS truncation parameter; ``sech(β)`` is the relative amplitude at the pulse edges
+        (β≈5.3 ⇒ 1 % truncation, the common choice).
     b1_range, n_b1 : tuple, int
-        Transmit-inhomogeneity ensemble: ``n_b1`` scales spanning ``b1_range``.
+        Transmit-inhomogeneity ensemble the pulse must invert across.
     off_resonance_hz, n_off_resonance : float, int
-        Off-resonance ensemble: ``n_off_resonance`` shifts spanning ±``off_resonance_hz``.
-    n_basis : int
-        Cosine (DCT-II) coefficients per quadrature (2·``n_basis`` real parameters).
-    peak_weight, sar_weight : float
-        Penalty weights on the peak-B1 and (when budgeted) SAR constraints.
-    n_restarts, maxiter, seed : int
-        Random restarts (best kept; first starts from a hard 180°), SciPy iteration cap, RNG.
+        Off-resonance ensemble (the pulse's sweep bandwidth must cover it).
+    mu_range, n_mu : tuple, int
+        Search range and grid density for the sweep parameter ``μ``.
     """
     n_rf = max(3, int(round(rf_duration / dt)))
+    T = n_rf * dt
 
-    # ensemble: transmit scale × static off-resonance (flattened)
     b1s = np.linspace(b1_range[0], b1_range[1], n_b1)
     dws = np.linspace(-off_resonance_hz, off_resonance_hz, n_off_resonance) * 2.0 * np.pi
     b1_scale = np.repeat(b1s, dws.size)
     dw = np.tile(dws, b1s.size)
 
-    # band-limited basis: DCT-II over the RF window, one set per quadrature
-    ii = (np.arange(n_rf)[:, None] + 0.5) / n_rf
-    Bmat = np.cos(np.pi * np.arange(n_basis)[None, :] * ii)   # (n_rf, n_basis)
-
-    def envelope(x):
-        return Bmat @ (x[:n_basis] + 1j * x[n_basis:])
-
-    # hard (flat) 180° reference: amplitude for a π on-resonance flip over the window
-    A0 = np.pi / (GAMMA * n_rf * dt)
-    hard = np.full(n_rf, A0, dtype=np.complex128)
+    # hard (flat) 180° reference and its energy (for the SAR ratio / budget)
+    A_hard = np.pi / (GAMMA * n_rf * dt)
+    hard = np.full(n_rf, A_hard, dtype=np.complex128)
     eff_hard = _efficiency(hard, b1_scale, dw, dt)
     _, sar_hard, _ = _rf_metrics(hard, dt)
-    sar_budget = None if sar_headroom is None else sar_headroom * sar_hard
 
-    def objective(x):
-        b1c = envelope(x)
-        eff = _efficiency(b1c, b1_scale, dw, dt)
-        peak, sar, _ = _rf_metrics(b1c, dt)
-        pen = peak_weight * max(0.0, peak / B1_max - 1.0) ** 2
-        if sar_budget is not None:
-            pen += sar_weight * max(0.0, sar / sar_budget - 1.0) ** 2
-        return -eff + pen
+    # peak amplitude: full B1_max, lowered to meet a SAR budget if one is set
+    A0 = float(B1_max)
+    sar_budget = np.inf
+    if sar_headroom is not None:
+        sar_budget = sar_headroom * sar_hard
+        sech2 = (1.0 / np.cosh(beta * np.linspace(-1, 1, n_rf))) ** 2
+        A0_sar = np.sqrt(sar_budget / (np.sum(sech2) * dt))
+        A0 = min(A0, A0_sar)
 
-    x_hard = np.zeros(2 * n_basis)
-    x_hard[0] = A0                                            # DC term → flat hard 180°
-    x0 = x_hard.copy(); x0[0] = 2.5 * A0                      # start hotter (helps find robust optima)
-    rng = np.random.default_rng(seed)
-    best = None
-    for r in range(max(1, n_restarts)):
-        xs = x_hard if r == 0 else x0 * (1.0 + 0.4 * rng.standard_normal(2 * n_basis))
-        res = minimize(objective, xs, method="L-BFGS-B", options={"maxiter": maxiter})
-        if best is None or res.fun < best.fun:
-            best = res
+    # choose the sweep μ that maximises ensemble refocusing efficiency (grid + local refine)
+    def neg_eff(mu):
+        return -_efficiency(_hs_envelope(A0, mu, beta, n_rf), b1_scale, dw, dt)
 
-    b1c = envelope(best.x)
+    mus = np.linspace(mu_range[0], mu_range[1], n_mu)
+    grid = [neg_eff(m) for m in mus]
+    j = int(np.argmin(grid))
+    lo = mus[max(0, j - 1)]; hi = mus[min(len(mus) - 1, j + 1)]
+    res = minimize_scalar(neg_eff, bounds=(lo, hi), method="bounded",
+                          options={"xatol": 1e-3})
+    mu = float(res.x) if -res.fun >= -grid[j] else float(mus[j])
+
+    b1c = _hs_envelope(A0, mu, beta, n_rf)
     eff = _efficiency(b1c, b1_scale, dw, dt)
     peak, sar, slew = _rf_metrics(b1c, dt)
-    nominal_flip = float(GAMMA * np.sum(np.abs(b1c)) * dt)
-    feasible = (peak <= B1_max * 1.02) and (sar_budget is None or sar <= sar_budget * 1.02)
+    bandwidth = 2.0 * mu * beta / (np.pi * T)
+    feasible = (eff > 0.9) and (peak <= B1_max * 1.02) and (sar <= sar_budget * 1.02)
 
     return RfPulseDesign(
-        B1=b1c, dt=dt, rf_duration=n_rf * dt,
+        B1=b1c, dt=dt, rf_duration=T, mu=mu, beta=float(beta), bandwidth_hz=float(bandwidth),
         refocusing_efficiency=eff, refocusing_efficiency_hard=eff_hard,
-        nominal_flip_deg=np.degrees(nominal_flip),
         peak_B1=peak, sar_proxy=sar, sar_ratio=sar / (sar_hard + 1e-30),
-        max_rf_slew=slew, B1_max=B1_max,
-        sar_budget=(np.inf if sar_budget is None else sar_budget),
-        feasible=feasible, n_basis=n_basis,
+        max_rf_slew=slew, B1_max=float(B1_max), sar_budget=float(sar_budget),
+        feasible=feasible,
     )
