@@ -91,6 +91,18 @@ class RfPulseDesign:
         n = self.B1.shape[0]
         return (np.arange(n) - (n - 1) / 2.0) * self.dt
 
+    def to_b1pulse(self, label="refocus"):
+        """Build a dmipy-sim ``B1Pulse`` from the designed envelope (needs the ``[sim]`` extra).
+
+        The optimised ``B1`` array (Tesla) is the ground-truth transmit waveform, so the
+        designed pulse drops straight into dmipy-sim's Bloch forward / slice-profile — the RF
+        mirror of ``NowDesign.to_sim_waveform``. Signed samples carry a π phase (axis along
+        −x), preserved as a real (hence complex-representable) ``B1(t)``.
+        """
+        from dmipy_sim.rf import B1Pulse
+        return B1Pulse(b1=self.B1.astype(np.complex128), dt=self.dt, label=label,
+                       flip_deg=np.degrees(float(np.sum(np.abs(self.flip_angles)))))
+
 
 # ── differentiable Bloch primitives (vectorised over the ensemble) ──────────────
 def _rotx(M, ang):

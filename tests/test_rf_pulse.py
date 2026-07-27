@@ -58,3 +58,26 @@ def test_times_axis_is_centred():
     t = d.times()
     assert t.shape == d.B1.shape
     assert t.mean() == pytest.approx(0.0, abs=1e-12)
+
+
+# ── dmipy-sim bridge (needs the [sim] extra with B1Pulse) ─────────────────────
+_HAS_B1PULSE = False
+try:
+    from dmipy_sim.rf import B1Pulse, bloch_simulate  # noqa: F401
+    _HAS_B1PULSE = True
+except Exception:
+    pass
+
+
+@pytest.mark.skipif(not _HAS_B1PULSE, reason="dmipy-sim with B1Pulse not installed")
+def test_to_b1pulse_round_trips_into_sim():
+    d = design_refocusing_rf(rf_duration=6e-3, dt=2e-4, B1_max=20e-6,
+                             n_b1=5, n_off_resonance=5, n_restarts=3, seed=0)
+    p = d.to_b1pulse()
+    # the sim B1Pulse carries the exact designed envelope (Tesla) and raster
+    np.testing.assert_allclose(p.b1.real, d.B1, rtol=0, atol=0)
+    assert p.dt == pytest.approx(d.dt, rel=1e-12)
+    assert p.nominal_flip_deg == pytest.approx(180.0, rel=1e-3)   # a refocusing 180
+    # and it runs through the sim Bloch forward: on resonance it inverts (Mz < 0)
+    _, Mz = bloch_simulate(p, df_hz=0.0)
+    assert float(Mz[0]) < 0.0
