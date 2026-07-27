@@ -1,10 +1,11 @@
 # dmipy-design — Agent Guide
 
 **Read this file, not the whole tree.** dmipy-design designs deliverable diffusion gradient
-waveforms under scanner limits, in the **instant-pulse approximation** (ideal hard RF). It is
-part of the [dmipy](https://github.com/dmrai-lab/dmipy) ecosystem — it produces waveforms that
-[dmipy-sim](https://github.com/dmrai-lab/dmipy-sim) can simulate and that export to a scanner via
-Pulseq.
+waveforms under scanner limits (the **gradient** layer works in the instant-pulse approximation —
+ideal hard RF), and, as a first step beyond that, designs the **refocusing RF pulse itself**
+(`design_refocusing_rf`). It is part of the [dmipy](https://github.com/dmrai-lab/dmipy) ecosystem
+— it produces waveforms that [dmipy-sim](https://github.com/dmrai-lab/dmipy-sim) can simulate and
+that export to a scanner via Pulseq.
 
 ## Scope — what belongs here (and what does not)
 
@@ -14,14 +15,17 @@ Pulseq.
 - **PGSTE** — stimulated-echo diffusion encoding through NOW (`optimizers/stimulated_echo.py`).
 - **Pulseq I/O** — scanner-runnable `.seq` export + offline checks (`pulseq_export.py`).
 - **Scanner constraints** — hardware/time limits + the SAFE PNS model (`constraints.py`, `now.py`).
+- **Refocusing RF** — `design_refocusing_rf` (`optimizers/rf_pulse.py`): a B1-robust 180° RF
+  envelope (hyperbolic-secant adiabatic warm start + GRAPE refinement), scored by the crushed-echo
+  refocusing efficiency through a Bloch forward. NumPy/SciPy only; can warm-start from a dmipy-sim
+  `B1Pulse` constructor (`adiabatic_hs`/`bir4`/`composite`) via `warm_start=`.
 
-**NOT here (out of the instant-pulse public scope):**
-- Finite-RF-pulse optimization (this package assumes ideal instantaneous pulses).
+**NOT here (still out of scope):**
 - CRLB / Fisher-information optimal experiment design.
 - Column-generation multishell protocol design.
 
-Do not add any of the above here — this package is deliberately scoped to the instant-pulse,
-deliverable-waveform layer.
+Do not add the above here. RF design is limited to the refocusing-pulse layer above (the
+diffusion *gradient* is still instant-pulse); it is not a general RF-pulse-design package.
 
 ## NOW is the design oracle — use it
 
@@ -94,6 +98,7 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 | `optimizers/min_te.py` | `min_te_for_b` — shortest TE for a target b (SNR-optimal), bisecting NOW |
 | `optimizers/timing.py` | `SequenceTiming` (asymmetric windows), `encoding_spectrum` — NumPy-only, JAX-free |
 | `optimizers/stimulated_echo.py` | `StimulatedEchoTiming`, `design_stimulated_echo` — PGSTE via NOW |
+| `optimizers/rf_pulse.py` | `design_refocusing_rf`, `RfPulseDesign` — B1-robust refocusing RF (adiabatic HS + GRAPE); `warm_start=` accepts a dmipy-sim `B1Pulse` |
 | `pulseq_export.py` | `.seq` export + delivery/PNS reports (needs `[pulseq]`) |
 | `constraints.py` | `HardwareConstraints`, `TimeConstraints` |
 

@@ -83,6 +83,18 @@ def test_sar_budget_lowers_amplitude():
     assert capped.sar_ratio <= 8.0 * 1.02
 
 
+def test_warm_start_from_array_is_refined():
+    """A caller-supplied warm start (here a crude flat hard-180 array) is used and refined."""
+    n = int(round(6e-3 / 2e-4))
+    A = np.pi / (GAMMA * n * 2e-4)
+    ws = np.full(n, A, dtype=complex)
+    d = design_refocusing_rf(rf_duration=6e-3, dt=2e-4, B1_max=20e-6, n_b1=5, n_off_resonance=5,
+                             warm_start=ws)
+    assert np.isnan(d.mu)                                  # no HS backbone when warm-started
+    assert d.B1.shape == (n,)
+    assert d.refocusing_efficiency > d.refocusing_efficiency_hard   # refinement improved it
+
+
 def test_deterministic():
     a = _design(); b = _design()
     np.testing.assert_allclose(a.B1, b.B1, rtol=1e-9, atol=0)
@@ -97,11 +109,22 @@ def test_times_axis_is_centred():
 
 # ── dmipy-sim bridge (needs the [sim] extra with B1Pulse) ─────────────────────
 _HAS_B1PULSE = False
+_HAS_BIR4 = False
 try:
     from dmipy_sim.rf import B1Pulse, bloch_simulate  # noqa: F401
     _HAS_B1PULSE = True
+    _HAS_BIR4 = hasattr(B1Pulse, "bir4")
 except Exception:
     pass
+
+
+@pytest.mark.skipif(not _HAS_BIR4, reason="dmipy-sim with the BIR-4 constructor not installed")
+def test_warm_start_from_sim_bir4():
+    """design can pull a dmipy-sim constructor (BIR-4) as the initial guess and refine it."""
+    ws = B1Pulse.bir4(180, 6e-3, 1e-4, peak_b1=19e-6)
+    d = design_refocusing_rf(rf_duration=6e-3, dt=1e-4, B1_max=19e-6, n_b1=7, n_off_resonance=7,
+                             warm_start=ws)
+    assert d.refocusing_efficiency > 0.9                   # already-robust warm start, refined
 
 
 @pytest.mark.skipif(not _HAS_B1PULSE, reason="dmipy-sim with B1Pulse not installed")
