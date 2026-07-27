@@ -7,7 +7,8 @@ from dmipy_design.optimizers.rf_pulse import _inversion_mz, GAMMA
 
 
 def _design(**kw):
-    base = dict(rf_duration=6e-3, dt=1e-4, B1_max=19e-6, n_b1=5, n_off_resonance=5, n_mu=10)
+    base = dict(rf_duration=6e-3, dt=1e-4, B1_max=19e-6, n_b1=5, n_off_resonance=5, n_mu=10,
+                refine=False)               # HS-only for speed; refinement has its own test
     base.update(kw)
     return design_refocusing_rf(**base)
 
@@ -61,6 +62,18 @@ def test_smooth_monotone_passage():
     ups = np.sum(np.diff(mz) > 1e-3)             # upward steps
     assert mz[-1] < -0.8                          # ends inverted
     assert ups < 0.25 * n                         # mostly descending — not flailing
+
+
+def test_grape_refinement_improves_on_hs():
+    """The optimal-control refinement, warm-started from HS, should not lose to the template
+    and should keep the pulse deliverable (peak within limit)."""
+    kw = dict(rf_duration=6e-3, dt=1e-4, B1_max=19e-6, n_b1=7, n_off_resonance=7, n_mu=14)
+    hs = design_refocusing_rf(refine=False, **kw)
+    ref = design_refocusing_rf(refine=True, n_refine_basis=8, **kw)
+    assert ref.refined                                    # refinement was kept
+    assert ref.refocusing_efficiency >= hs.refocusing_efficiency - 1e-6
+    assert ref.peak_B1 <= ref.B1_max * 1.02               # still deliverable
+    assert ref.refocusing_efficiency > 0.9
 
 
 def test_sar_budget_lowers_amplitude():

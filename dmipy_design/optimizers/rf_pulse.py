@@ -8,15 +8,23 @@ sweep is slow enough (the *adiabatic condition*) — the magnetisation **follows
 field** from +z to −z regardless of the exact $B_1^+$.  That is what makes it B1-robust, and its
 trajectory is a smooth spiral down the Bloch sphere, not a delicate balance of flip angles.
 
-This module designs the classic **hyperbolic-secant (HS) adiabatic full passage** (Silver,
-Joseph & Hoult 1985), the complex envelope
+The design is **two stages**:
 
-    B1(t) = A0 · sech(β τ)^(1 + i μ),      τ = 2t/T − 1 ∈ [−1, 1]
+1. **Warm start — a hyperbolic-secant (HS) adiabatic full passage** (Silver, Joseph & Hoult
+   1985), the complex envelope
 
-— amplitude ``A0 sech(βτ)`` and a tanh frequency sweep of half-bandwidth ``μβ/(πT)``.  ``A0`` is
-the peak amplitude (the deliverable knob, capped at ``B1_max``), ``β`` sets the truncation, and
-``μ`` sets the sweep bandwidth / adiabaticity.  The design chooses ``μ`` (and, under a SAR cap,
-``A0``) to maximise the ensemble **refocusing efficiency** through the Bloch equation.
+       B1(t) = A0 · sech(β τ)^(1 + i μ),      τ = 2t/T − 1 ∈ [−1, 1]
+
+   — amplitude ``A0 sech(βτ)`` and a tanh frequency sweep of half-bandwidth ``μβ/(πT)``.  ``A0``
+   is the peak (capped at ``B1_max``), ``β`` the truncation, ``μ`` the sweep bandwidth; ``μ`` is
+   chosen to maximise the ensemble refocusing efficiency.  This is already robust *and* physical.
+
+2. **Optimal-control refinement (GRAPE-style) — optional, on by default.** Starting from the HS
+   pulse, optimise a few *smooth* correction modes (a low-order DCT per quadrature) of the full
+   waveform to squeeze out more efficiency / peak headroom.  Because it starts in the adiabatic
+   basin and the correction is band-limited, the pulse stays a smooth, deliverable spiral — it
+   does not wander off into a non-physical optimum (which is what a free-form search from a cold
+   start does).  The best of {HS, refined} by efficiency is returned.
 
 **Objective — per-spin refocusing fidelity.**  The figure of merit is the crushed spin-echo
 refocusing efficiency ``η = (1 − M_z)/2 ∈ [0,1]`` (M_z = the pulse acting on +z; η = |β|² in
@@ -84,6 +92,8 @@ class RfPulseDesign:
     feasible : bool
         True if the ensemble refocusing efficiency exceeds 0.9 (a robust adiabatic passage) and
         peak-B1 / SAR are within their limits.
+    refined : bool
+        True if the GRAPE-style refinement improved on the HS warm start and was kept.
     """
     B1: np.ndarray
     dt: float
@@ -100,6 +110,7 @@ class RfPulseDesign:
     B1_max: float
     sar_budget: float
     feasible: bool
+    refined: bool
 
     def times(self) -> np.ndarray:
         """Sample times of the RF envelope (s), centred at 0."""
@@ -173,7 +184,8 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
                          B1_max=20e-6, sar_headroom=None, beta=5.3,
                          b1_range=(0.7, 1.3), n_b1=7,
                          off_resonance_hz=250.0, n_off_resonance=7,
-                         mu_range=(0.7, 6.0), n_mu=18) -> RfPulseDesign:
+                         mu_range=(0.7, 6.0), n_mu=18,
+                         refine=True, n_refine_basis=8, refine_maxiter=200) -> RfPulseDesign:
     """Design a B1-robust hyperbolic-secant adiabatic refocusing pulse.
 
     Amplitude is set to the deliverable peak (``A0 = B1_max``, or lowered to meet ``sar_headroom``
@@ -201,7 +213,12 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
         Off-resonance ensemble (the pulse's sweep bandwidth must cover it).
     mu_range, n_mu : tuple, int
         Search range and grid density for the sweep parameter ``μ``.
+    refine : bool
+        Run the GRAPE-style optimal-control refinement from the HS warm start (default True).
+    n_refine_basis, refine_maxiter : int
+        Smooth correction modes per quadrature, and the refinement iteration cap.
     """
+    from scipy.optimize import minimize
     n_rf = max(3, int(round(rf_duration / dt)))
     T = n_rf * dt
 
@@ -239,6 +256,34 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
 
     b1c = _hs_envelope(A0, mu, beta, n_rf)
     eff = _efficiency(b1c, b1_scale, dw, dt)
+
+    # ── stage 2: GRAPE-style refinement from the HS warm start ──────────────────
+    refined = False
+    if refine:
+        hs = b1c
+        _, sar_hs, _ = _rf_metrics(hs, dt)
+        sar_cap = sar_budget if np.isfinite(sar_budget) else sar_hs   # don't spend more energy
+        ii = (np.arange(n_rf)[:, None] + 0.5) / n_rf
+        Br = np.cos(np.pi * np.arange(n_refine_basis)[None, :] * ii)  # (n_rf, n_refine_basis)
+
+        def _env(c):
+            return hs + Br @ (c[:n_refine_basis] + 1j * c[n_refine_basis:])
+
+        def _obj(c):
+            b = _env(c)
+            e = _efficiency(b, b1_scale, dw, dt)
+            pk, sr, _ = _rf_metrics(b, dt)
+            return (-e + 200.0 * max(0.0, pk / B1_max - 1.0) ** 2
+                    + 5.0 * max(0.0, sr / sar_cap - 1.0) ** 2)
+
+        rr = minimize(_obj, np.zeros(2 * n_refine_basis), method="L-BFGS-B",
+                      options={"maxiter": refine_maxiter})
+        cand = _env(rr.x)
+        if _efficiency(cand, b1_scale, dw, dt) > eff:      # keep the best of {HS, refined}
+            b1c = cand
+            eff = _efficiency(b1c, b1_scale, dw, dt)
+            refined = True
+
     peak, sar, slew = _rf_metrics(b1c, dt)
     bandwidth = 2.0 * mu * beta / (np.pi * T)
     feasible = (eff > 0.9) and (peak <= B1_max * 1.02) and (sar <= sar_budget * 1.02)
@@ -248,5 +293,5 @@ def design_refocusing_rf(rf_duration=6e-3, *, dt=1e-4,
         refocusing_efficiency=eff, refocusing_efficiency_hard=eff_hard,
         peak_B1=peak, sar_proxy=sar, sar_ratio=sar / (sar_hard + 1e-30),
         max_rf_slew=slew, B1_max=float(B1_max), sar_budget=float(sar_budget),
-        feasible=feasible,
+        feasible=feasible, refined=refined,
     )
