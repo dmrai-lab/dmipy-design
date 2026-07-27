@@ -12,6 +12,10 @@ Design deliverable gradient waveforms for diffusion MRI under real scanner limit
   bisecting TE around the NOW max-b primitive.
 - **PGSTE** (``design_stimulated_echo``) — stimulated-echo diffusion encoding through the
   same NOW core (matched τ₁ = τ₃ periods around a long, T1-limited mixing time).
+- **Refocusing RF** (``design_refocusing_rf``) — beyond the instant-pulse approximation:
+  design a B1-robust, deliverable 180° RF *envelope* (band-limited + peak-B1 + SAR) via a
+  Bloch forward over a transmit-inhomogeneity × off-resonance ensemble. The RF analogue of
+  NOW's gradient box; NumPy/SciPy only.
 - **Timing** (``SequenceTiming``) — the physical encoding-window budget; the pre/post-180
   window asymmetry is a *derived consequence* of the scanner timing, not a free knob.
 - **Pulseq I/O** (``dmipy_design.pulseq_export``) — export a design to a scanner-runnable
@@ -31,6 +35,8 @@ from .optimizers import (
     min_te_for_b,
     StimulatedEchoTiming,
     design_stimulated_echo,
+    design_refocusing_rf,
+    RfPulseDesign,
 )
 
 __all__ = [
@@ -43,6 +49,8 @@ __all__ = [
     "min_te_for_b",
     "StimulatedEchoTiming",
     "design_stimulated_echo",
+    "design_refocusing_rf",
+    "RfPulseDesign",
 ]
 
 try:
