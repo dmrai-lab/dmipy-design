@@ -1,12 +1,12 @@
 """
-Tests for SubstrateBank, SubstrateEntry, apply_waveform_jax, and
+Tests for SubstrateBank, SubstrateEntry, replay_jax, and
 SubstrateBank.compute_bias_jax.
 
 Coverage:
   1. SubstrateEntry creation and field access
-  2. apply_waveform_jax returns correct shape
-  3. apply_waveform_jax: free diffusion at b~0 (near-zero G) gives signal ≈ 1.0
-  4. apply_waveform_jax is differentiable (jax.grad does not crash)
+  2. replay_jax returns correct shape
+  3. replay_jax: free diffusion at b~0 (near-zero G) gives signal ≈ 1.0
+  4. replay_jax is differentiable (jax.grad does not crash)
   5. SubstrateBank.compute_bias_jax returns a scalar
   6. walker_weights: non-uniform weights give different result from uniform
   7. Synthetic bank creation via make_synthetic_bank
@@ -81,14 +81,14 @@ def test_substrate_entry_creation(simple_entry):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: apply_waveform_jax returns correct shape
+# Test 2: replay_jax returns correct shape
 # ---------------------------------------------------------------------------
 
-def test_apply_waveform_jax_shape(simple_entry, nonzero_G):
-    from dmipy_sim.trajectories import apply_waveform_jax
+def test_replay_jax_shape(simple_entry, nonzero_G):
+    from dmipy_sim.trajectories import replay_jax
 
     n_meas = nonzero_G.shape[0]
-    signals = apply_waveform_jax(
+    signals = replay_jax(
         nonzero_G, simple_entry.trajectories, simple_entry.dt_traj
     )
     assert signals.shape == (n_meas,), f"Expected ({n_meas},), got {signals.shape}"
@@ -98,10 +98,10 @@ def test_apply_waveform_jax_shape(simple_entry, nonzero_G):
 # Test 3: At b~0 (near-zero G), signal ≈ 1.0
 # ---------------------------------------------------------------------------
 
-def test_apply_waveform_jax_b_zero(simple_entry, small_G):
-    from dmipy_sim.trajectories import apply_waveform_jax
+def test_replay_jax_b_zero(simple_entry, small_G):
+    from dmipy_sim.trajectories import replay_jax
 
-    signals = apply_waveform_jax(
+    signals = replay_jax(
         small_G, simple_entry.trajectories, simple_entry.dt_traj
     )
     # All signals should be ≈ 1 (cosine of zero phase)
@@ -110,11 +110,11 @@ def test_apply_waveform_jax_b_zero(simple_entry, small_G):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: apply_waveform_jax is differentiable w.r.t. G
+# Test 4: replay_jax is differentiable w.r.t. G
 # ---------------------------------------------------------------------------
 
-def test_apply_waveform_jax_differentiable(simple_entry):
-    from dmipy_sim.trajectories import apply_waveform_jax
+def test_replay_jax_differentiable(simple_entry):
+    from dmipy_sim.trajectories import replay_jax
 
     traj = simple_entry.trajectories
     dt   = simple_entry.dt_traj
@@ -122,7 +122,7 @@ def test_apply_waveform_jax_differentiable(simple_entry):
     G0   = jnp.zeros((1, n_t, 3), dtype=jnp.float32)
 
     def objective(G):
-        signals = apply_waveform_jax(G, traj, dt)
+        signals = replay_jax(G, traj, dt)
         return jnp.sum(signals)
 
     # This must not raise
@@ -174,7 +174,7 @@ def test_compute_bias_jax_scalar(synthetic_bank):
 # ---------------------------------------------------------------------------
 
 def test_walker_weights_affect_result(simple_entry):
-    from dmipy_sim.trajectories import apply_waveform_jax
+    from dmipy_sim.trajectories import replay_jax
 
     traj = simple_entry.trajectories
     dt   = simple_entry.dt_traj
@@ -194,13 +194,13 @@ def test_walker_weights_affect_result(simple_entry):
 
     n_walkers = traj.shape[0]
     # Uniform weights
-    sig_uniform = apply_waveform_jax(G, traj, dt, walker_weights=None)
+    sig_uniform = replay_jax(G, traj, dt, weights=None)
     # Strongly skewed weights (concentrate on first 10% of walkers)
     w = np.zeros(n_walkers, dtype=np.float32)
     w[:n_walkers // 10] = 1.0
     w[n_walkers // 10:] = 0.001
-    sig_weighted = apply_waveform_jax(G, traj, dt,
-                                      walker_weights=jnp.array(w))
+    sig_weighted = replay_jax(G, traj, dt,
+                                      weights=jnp.array(w))
 
     # They should differ (different walkers emphasised)
     diff = float(jnp.max(jnp.abs(sig_uniform - sig_weighted)))

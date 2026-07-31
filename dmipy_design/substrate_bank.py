@@ -3,7 +3,7 @@ SubstrateBank — registry of biologically grounded substrates for MC bias
 estimation in column generation OED.
 
 Each substrate entry holds pre-computed walker trajectories and the nominal
-analytical model parameters. The replay engine (apply_waveform_jax) evaluates
+analytical model parameters. The replay engine (replay_jax) evaluates
 any waveform G(t) against stored trajectories without re-running Monte Carlo.
 
 The bias term B(u) measures the normalised squared difference between the
@@ -172,7 +172,7 @@ class SubstrateBank:
         """Compute the aggregated MC bias term for a given waveform G.
 
         For each substrate entry:
-        1. Replay MC: S_mc = apply_waveform_jax(G, entry.trajectories, ...)
+        1. Replay MC: S_mc = replay_jax(G, entry.trajectories, ...)
         2. Evaluate analytical model: S_an = forward_fn(entry.theta_nominal, scheme)
         3. Normalised squared error: err = mean[(S_mc - S_an)^2] / (mean[S_mc^2] + 1e-6)
         4. Weight by entry.biological_weight
@@ -200,14 +200,14 @@ class SubstrateBank:
         if not _JAX_AVAILABLE:
             raise ImportError("JAX is required for compute_bias_jax.")
 
-        from dmipy_sim.trajectories import apply_waveform_jax  # lazy import
+        from dmipy_sim.trajectories import replay_jax  # lazy import
 
         weighted_err_sum  = jnp.zeros((), dtype=jnp.float32)
         total_weight = 0.0
 
         for entry in self.entries:
             # MC signal from trajectory replay
-            S_mc = apply_waveform_jax(
+            S_mc = replay_jax(
                 G, entry.trajectories, entry.dt_traj, dt_wf, entry.walker_weights
             ).astype(jnp.float32)   # (n_meas,)
 
