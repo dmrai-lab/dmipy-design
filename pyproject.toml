@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov", "matplotlib"]
+# Replay-pack waveform design (dmipy_design.replay_design) needs the sim replay engine.
+sim = ["dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim.git"]
 
 [tool.setuptools.packages.find]
 where = ["."]
