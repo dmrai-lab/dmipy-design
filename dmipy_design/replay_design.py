@@ -48,6 +48,8 @@ class DiscriminationResult:
     E_A: float
     E_B: float
     b_value: float           # achieved b [s/m^2]
+    te: float = None         # encoding window used [s] (None = full pack window)
+    max_slew: float = None   # realized peak slew [T/m/s]
 
 
 def _bvalue(g_axis, dt, gamma):
@@ -88,7 +90,8 @@ class _PackForward:
 
 
 def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0), G_max=0.08,
-                                   n_basis=16, n_restarts=4, maxiter=300, seed=0, refocus_weight=50.0):
+                                   te=None, slew_max=None, n_basis=16, n_restarts=4, maxiter=300,
+                                   seed=0, refocus_weight=50.0, slew_weight=1e-3):
     """Design a single deliverable gradient waveform that maximally discriminates ``pack_a`` from
     ``pack_b`` (both :class:`dmipy_sim.replay.ReplayPack`), i.e. ``max_g |E_A(g) - E_B(g)|``.
 
@@ -98,8 +101,11 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
     (``|g| <= G_max`` via tanh). Optimized by SciPy L-BFGS-B with the analytic gradient (no autodiff),
     warm-started from the best plain PGSE (a cold start sits at ~zero contrast gradient), multi-restart.
 
-    Both packs must share the save grid (``dt``, ``n_t``); ``K`` may differ. Returns a
-    :class:`DiscriminationResult`.
+    ``te`` restricts the encoding to a window ``[0, te]`` (the waveform is zero after; the echo forms at
+    ``te`` — the pack's TE-prefix property), which bounds ``b`` to a realistic range. ``slew_max`` [T/m/s]
+    adds a soft slew penalty so the waveform is scanner-deliverable (the smooth basis already band-limits
+    slew; this bounds it explicitly). Both packs must share the save grid (``dt``, ``n_t``); ``K`` may
+    differ. Returns a :class:`DiscriminationResult`.
     """
     from dmipy_sim.constants import GAMMA
 
@@ -109,30 +115,49 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
     d = np.asarray(direction, float); d = d / np.linalg.norm(d)
     fa, fb = _PackForward(pack_a, d, GAMMA), _PackForward(pack_b, d, GAMMA)
 
-    # smooth cosine synthesis basis, no DC column (structural refocusing): g = G_max tanh(B c)
+    # smooth cosine synthesis basis, no DC column (structural refocusing): g = mask * G_max tanh(B c)
     tt = (np.arange(n_t) + 0.5) / n_t
     kk = np.arange(1, int(n_basis) + 1)
     B = np.cos(np.pi * np.outer(tt, kk))                          # (n_t, n_basis)
+    mask = np.ones(n_t)
+    if te is not None:
+        te_idx = min(n_t, max(2, int(round(te / dt))))
+        mask = np.zeros(n_t); mask[:te_idx] = 1.0                 # encode only within [0, te]
 
     def g_of(c):
         raw = B @ c
-        return G_max * np.tanh(raw), raw
+        return mask * (G_max * np.tanh(raw)), raw
+
+    def _slew_pen_and_grad(g):
+        "Soft penalty for |dg/dt| exceeding slew_max: sum relu(|s|-slew_max)^2, with its dpen/dg."
+        if slew_max is None:
+            return 0.0, np.zeros_like(g)
+        s = np.diff(g) / dt                                       # (n_t-1,)
+        over = np.maximum(np.abs(s) - slew_max, 0.0)
+        pen = slew_weight * float(np.sum(over ** 2))
+        ds = slew_weight * 2 * over * np.sign(s) / dt            # dpen/ds_t
+        dg = np.zeros_like(g)                                     # adjoint of the difference operator
+        dg[:-1] -= ds; dg[1:] += ds
+        return pen, dg
 
     def loss_and_grad(c):
         g, raw = g_of(c)
         Ea, dEa = fa.E_and_grad(g)
         Eb, dEb = fb.E_and_grad(g)
         diff = Ea - Eb
-        # objective: -(Ea-Eb)^2 + refocus_weight (sum g dt)^2  (minimize)
-        L = -diff ** 2 + refocus_weight * (np.sum(g) * dt) ** 2
-        dL_dg = -2 * diff * (dEa - dEb) + refocus_weight * 2 * (np.sum(g) * dt) * dt
-        dg_draw = G_max * (1.0 - np.tanh(raw) ** 2)               # d g / d raw
+        spen, dspen = _slew_pen_and_grad(g)
+        # objective: -(Ea-Eb)^2 + refocus_weight (sum g dt)^2 + slew penalty  (minimize)
+        L = -diff ** 2 + refocus_weight * (np.sum(g) * dt) ** 2 + spen
+        dL_dg = -2 * diff * (dEa - dEb) + refocus_weight * 2 * (np.sum(g) * dt) * dt + dspen
+        dg_draw = mask * G_max * (1.0 - np.tanh(raw) ** 2)        # d g / d raw (through mask)
         dL_dc = B.T @ (dL_dg * dg_draw)
         return float(L), np.asarray(dL_dc, np.float64)
 
-    # warm start: best plain PGSE projected onto the basis (via least squares on the pre-tanh signal)
-    delta = max(2 * dt, 0.25 * n_t * dt)
-    Delta = min((n_t - 2) * dt, delta + 0.5 * n_t * dt)
+    # warm start: best plain PGSE projected onto the basis (via least squares on the pre-tanh signal),
+    # fitted within the encoding window (te, or the full pack window)
+    win = (te if te is not None else (n_t - 1) * dt)
+    delta = max(2 * dt, 0.25 * win)
+    Delta = min(win - dt, delta + 0.5 * win)
     nd, ng = max(1, int(round(delta / dt))), int(round(Delta / dt))
     bu = (GAMMA * delta) ** 2 * (Delta - delta / 3)
     def _pgse_c(b):
@@ -153,5 +178,7 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
     g_final, _ = g_of(best.x)
     Ea = fa.E_and_grad(g_final)[0]; Eb = fb.E_and_grad(g_final)[0]
     G = g_final[:, None] * d[None, :]
+    max_slew = float(np.abs(np.diff(g_final) / dt).max())
     return DiscriminationResult(G=G, dt=dt, direction=d, contrast=abs(Ea - Eb),
-                                E_A=Ea, E_B=Eb, b_value=_bvalue(g_final, dt, GAMMA))
+                                E_A=Ea, E_B=Eb, b_value=_bvalue(g_final, dt, GAMMA),
+                                te=(te if te is not None else (n_t - 1) * dt), max_slew=max_slew)
