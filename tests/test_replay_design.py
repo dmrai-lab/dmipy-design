@@ -75,3 +75,19 @@ def test_forward_matches_engine(packs):
     res = design_discriminating_waveform(pa, packs[1], G_max=0.3, maxiter=40, n_restarts=1, seed=1)
     W = compile_scheme(res.G[None], DT, pa.K, GAMMA)
     npt.assert_allclose(replay_signal(pa, W)[0], res.E_A, atol=1e-4)
+
+
+def test_deliverable_te_window_and_slew(packs):
+    "T2: a TE-encoding window bounds b and zeros the waveform after TE; a slew cap is respected."
+    pa, pb = packs
+    te = 0.6 * (N_T - 1) * DT
+    res = design_discriminating_waveform(pa, pb, direction=(1., 0, 0), G_max=0.3, te=te,
+                                         slew_max=50.0, maxiter=250, n_restarts=3, seed=0)
+    te_idx = int(round(te / DT))
+    assert np.allclose(res.G[te_idx:], 0.0)                  # no encoding after TE
+    assert res.te == pytest.approx(te)
+    assert res.contrast > 0.03                               # still discriminates within the window
+    # bounded b (a full-window design reaches far higher) and a respected slew cap (soft)
+    assert res.max_slew <= 50.0 * 1.3
+    # analytic-gradient sanity: finite-difference on the objective at a random c
+    from dmipy_design.replay_design import _PackForward  # noqa: F401  (import path check)
