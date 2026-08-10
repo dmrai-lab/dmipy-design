@@ -19,6 +19,11 @@ that export to a scanner via Pulseq.
   envelope (hyperbolic-secant adiabatic warm start + GRAPE refinement), scored by the crushed-echo
   refocusing efficiency through a Bloch forward. NumPy/SciPy only; can warm-start from a dmipy-sim
   `B1Pulse` constructor (`adiabatic_hs`/`bir4`/`composite`) via `warm_start=`.
+- **Substrate-informed waveform design** — `replay_design.py::design_discriminating_waveform`:
+  optimise a gradient waveform *through* a stored Monte-Carlo substrate by replaying a `.rpk`
+  pack (`dmipy_sim.replay`), e.g. `max_g |E_cyl - E_sph|`. Closed-form gradient through the
+  DCT + complex mean → SciPy L-BFGS-B (no autodiff), smooth cosine basis + PGSE warm start.
+  The substrate-informed counterpart to NOW's substrate-blind b-maximiser; needs `[sim]`.
 
 **NOT here (still out of scope):**
 - CRLB / Fisher-information optimal experiment design.
@@ -100,6 +105,7 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 | `optimizers/stimulated_echo.py` | `StimulatedEchoTiming`, `design_stimulated_echo` — PGSTE via NOW |
 | `optimizers/rf_pulse.py` | `design_refocusing_rf`, `RfPulseDesign` — B1-robust refocusing RF (adiabatic HS + GRAPE); `warm_start=` accepts a dmipy-sim `B1Pulse` |
 | `pulseq_export.py` | `.seq` export + delivery/PNS reports (needs `[pulseq]`) |
+| `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B, `[sim]`) |
 | `constraints.py` | `HardwareConstraints`, `TimeConstraints` |
 
 ## Tests
