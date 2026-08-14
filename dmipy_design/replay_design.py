@@ -61,7 +61,10 @@ class _PackForward:
     """Analytic E(g) and dE/dg for one pack along a fixed direction, at fixed (dt, n_t, gamma)."""
 
     def __init__(self, pack, direction, gamma):
-        C = np.asarray(pack.dct_coeffs, np.float64)               # (n_walkers, K, 3)
+        # Positions are stored one tensor per axis (pos_x/pos_y/pos_z); read them through the engine's
+        # accessor rather than a legacy `dct_coeffs` attribute, which packs no longer carry.
+        from dmipy_sim.compression import read_position_coeffs
+        C = read_position_coeffs(pack.arrays, dtype=np.float64)    # (n_walkers, K, 3)
         self.K = C.shape[1]
         self.Cd = C @ np.asarray(direction, np.float64)           # (n_walkers, K)  = C . d
         self.w = np.asarray(pack.spin_weights, np.float64)
