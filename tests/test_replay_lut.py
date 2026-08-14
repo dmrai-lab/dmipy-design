@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("dmipy_sim")
 from scipy.fft import dct
 from dmipy_sim.replay import ReplayPack, compile_scheme, replay_signal
+from dmipy_sim.compression import pack_position_arrays
 from dmipy_sim.constants import GAMMA
 from dmipy_design.replay_lut import (pgse_response_lut, best_discriminating_pgse,
                                      discriminability_matrix)
@@ -25,7 +26,7 @@ def _slab_pack(L, seed):
     traj[:, :, 1:] = np.cumsum(rng.normal(0, step, (N_W, N_T, 2)), axis=1)
     traj -= traj.mean(1, keepdims=True)
     C = dct(traj, type=2, norm="ortho", axis=1)[:, :K, :]
-    return ReplayPack({"dct_coeffs": C.astype(np.float32), "spin_weights": np.ones(N_W, np.float32)},
+    return ReplayPack({**pack_position_arrays(C, np.float32), "spin_weights": np.ones(N_W, np.float32)},
                       {"n_t": N_T, "dt": DT, "walk_params": {"n_t": N_T, "dt_traj": DT}})
 
 

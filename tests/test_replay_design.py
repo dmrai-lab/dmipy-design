@@ -13,6 +13,7 @@ pytest.importorskip("dmipy_sim")
 
 from scipy.fft import dct
 from dmipy_sim.replay import ReplayPack, compile_scheme, replay_signal
+from dmipy_sim.compression import pack_position_arrays
 from dmipy_sim.constants import GAMMA
 from dmipy_design.replay_design import design_discriminating_waveform
 
@@ -33,7 +34,7 @@ def _slab_pack(L, seed):
     traj[:, :, 1:] = np.cumsum(rng.normal(0, step, (N_W, N_T, 2)), axis=1)   # free y,z
     traj -= traj.mean(1, keepdims=True)
     C = dct(traj, type=2, norm="ortho", axis=1)[:, :K, :]
-    arrays = {"dct_coeffs": C.astype(np.float32), "spin_weights": np.ones(N_W, np.float32)}
+    arrays = {**pack_position_arrays(C, np.float32), "spin_weights": np.ones(N_W, np.float32)}
     meta = {"n_t": N_T, "dt": DT, "walk_params": {"n_t": N_T, "dt_traj": DT}}
     return ReplayPack(arrays, meta)
 
