@@ -66,6 +66,14 @@ def _pns_pct(G3, dt, kernels):
     return np.sqrt(pns_sq)
 
 
+#: The b-tensor shapes this solver realises, as (b_delta, name, tensor rank).
+#: The shape constraint is built from equalities between b-tensor components (see ``c_shape``), which
+#: expresses "two axes equal" (planar) or "three axes equal" (spherical) but not an arbitrary eigenvalue
+#: ratio. There are therefore exactly three achievable shapes, not a continuum in ``b_delta``.
+SUPPORTED_SHAPES = ((1.0, "LTE", 1), (0.0, "STE", 3), (-0.5, "PTE", 2))
+_B_DELTA_TOL = 1e-6
+
+
 def _rank_of(b_delta):
     if abs(b_delta - 1.0) < 1e-6:
         return 1
@@ -74,13 +82,38 @@ def _rank_of(b_delta):
     return 3
 
 
+def _validate_b_delta(b_delta):
+    """Reject a ``b_delta`` this solver cannot realise, instead of silently returning another shape.
+
+    The rank-3 shape constraint pins the b-tensor to isotropy without reference to the requested value, so
+    an intermediate ``b_delta`` (0.75, 0.5, 0.25, ...) previously returned a *spherical* design carrying
+    the requested number in ``NowDesign.b_delta`` and a shape residual of ~1e-30 -- correct for the
+    constraint that was actually applied, and silently not what was asked for.
+    """
+    try:
+        bd = float(b_delta)
+    except (TypeError, ValueError):
+        raise TypeError(f"b_delta must be a float, got {b_delta!r}") from None
+    if any(abs(bd - t) <= _B_DELTA_TOL for t, _, _ in SUPPORTED_SHAPES):
+        return bd
+    opts = ", ".join(f"{t:+g} ({n})" for t, n, _ in SUPPORTED_SHAPES)
+    raise ValueError(
+        f"b_delta={bd:+g} is not realisable by this solver. Supported shapes: {opts}. "
+        f"The shape constraint is built from equalities between b-tensor components, so it can pin two "
+        f"axes equal (planar) or three axes equal (spherical), but not an arbitrary eigenvalue ratio; "
+        f"a request in between would return an isotropic design labelled with the value you asked for. "
+        f"For an intermediate shape, combine measurements of the supported shapes, or extend c_shape to "
+        f"constrain the eigenvalue ratio directly."
+    )
+
+
 @dataclass
 class NowDesign:
     G: np.ndarray            # (n_t, 3) physical gradient, T/m
     dt: float
     echo_idx: int
     b_value: float           # s/m²
-    b_delta: float
+    b_delta: float         # requested shape; validated on entry, so also the achieved one
     n_axes: int
     max_slew: float
     max_amplitude: float
@@ -120,10 +153,13 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
                         n_axes=None, n_restarts=8, maxiter=300, seed=0):
     """Design a max-b spin-echo gradient waveform via NOW's SQP recipe (LTE/PTE/STE).
 
-    ``timing`` is a ``SequenceTiming``; if None a default Prisma budget is used.  Returns a
-    ``NowDesign`` with the physical gradient and the (machine-precision) constraint residuals.
+    ``b_delta`` must be one of the three realisable shapes -- ``1.0`` (LTE), ``0.0`` (STE) or ``-0.5``
+    (PTE); anything else raises ``ValueError`` rather than returning a different shape (see
+    ``SUPPORTED_SHAPES``).  ``timing`` is a ``SequenceTiming``; if None a default Prisma budget is used.
+    Returns a ``NowDesign`` with the physical gradient and the (machine-precision) constraint residuals.
     """
     from .timing import SequenceTiming
+    b_delta = _validate_b_delta(b_delta)
     if timing is None:
         timing = SequenceTiming(t_excite=3e-3, t_refocus=6e-3, t_readout_pre_echo=14e-3)
     na = _rank_of(b_delta) if n_axes is None else int(n_axes)
