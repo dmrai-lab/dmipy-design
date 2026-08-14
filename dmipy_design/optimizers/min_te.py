@@ -11,7 +11,7 @@ scan.
 """
 from __future__ import annotations
 
-from .now import design_waveform_now
+from .now import design_waveform_now, _validate_b_delta
 
 
 def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
@@ -46,6 +46,10 @@ def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
     (design, te) : tuple
         The feasible ``NowDesign`` at the smallest TE reaching ``b_target``, and that TE (s).
     """
+    # Validate the shape up front. The bracket search below treats ValueError as "TE below the
+    # encoding-window floor" and keeps going, so an unrealisable b_delta raised from inside the solver
+    # would be swallowed and re-reported as an unreachable b_target.
+    _validate_b_delta(b_delta)
     dkw = {k: v for k, v in design_kwargs.items() if k != 'seed'}
 
     def reached(te):
