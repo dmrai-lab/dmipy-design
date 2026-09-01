@@ -39,7 +39,7 @@ def pgse_response_lut(packs, b_grid, *, delta=None, Delta=None, direction=(1.0, 
     G = np.stack([_pgse_G(n_t, dt, np.sqrt(b / bu), delta, Delta, direction) for b in b_grid])  # (n_b,n_t,3)
     E = np.zeros((len(packs), len(b_grid)))
     for i, p in enumerate(packs):
-        E[i] = replay_signal(p, compile_scheme(G, dt, p.K, GAMMA))
+        E[i] = replay_signal(p, compile_scheme(G, dt, p.K, GAMMA, n_t=p.n_t))
     return E
 
 
