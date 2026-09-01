@@ -2,7 +2,7 @@
 
 The pivot: instead of re-simulating a substrate (or replaying raw ~GB trajectory arrays) for every
 candidate waveform, we replay pre-computed ``.rpk`` replay packs. A pack is fixed; the waveform g(t) is
-the optimization variable; the diffusion-weighted signal is a matmul on the pack's DCT-compressed
+the optimization variable; the diffusion-weighted signal is a matmul on the pack's compressed
 trajectory (``dmipy_sim.replay``), and its gradient w.r.t. the waveform is closed-form — so waveform
 design is gradient descent through the stored Monte-Carlo substrate, with no autodiff (this package is
 NumPy/SciPy-only by design: fully numpy-analytic derivatives → SciPy L-BFGS-B, per the repo philosophy).
@@ -15,9 +15,9 @@ The signal of one 1-axis waveform ``g(t)`` (direction ``d`` fixed) against a pac
 
     phi_i = gamma * dt * sum_k Cd_{i,k} ghat_k,   S = <w exp(i phi)>/<w>,   E = |S|,
 
-and the analytic gradient chains back through the (linear) DCT to ``g``:
+and the analytic gradient chains back through the (linear) projection to ``g``:
 
-    dE/dghat_k = (gamma dt / |S|) * Re( conj(S) * i * <w exp(i phi) Cd_{:,k}> ),   dE/dg = idct(dE/dghat).
+    dE/dghat_k = (gamma dt / |S|) * Re( conj(S) * i * <w exp(i phi) Cd_{:,k}> ),   dE/dg = P^T (dE/dghat), P the projection above.
 
 Substrate set: the Substrate Commons canonical replay dataset (cylinders / spheres / planes,
 0.1-20 um). Orientation convention: anisotropic packs (cylinder/plane) are replayed in their canonical
@@ -27,7 +27,7 @@ given — the discriminating axis for shape/size contrast.
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.fft import dct, idct
+from scipy.fft import dst, idst
 from scipy.optimize import minimize
 
 __all__ = ["load_pack", "design_discriminating_waveform", "DiscriminationResult"]
@@ -58,24 +58,45 @@ def _bvalue(g_axis, dt, gamma):
 
 
 class _PackForward:
-    """Analytic E(g) and dE/dg for one pack along a fixed direction, at fixed (dt, n_t, gamma)."""
+    """Analytic E(g) and dE/dg for one pack along a fixed direction, at fixed (dt, n_t, gamma).
+
+    Packs store positions as ``bridge_dst``: per axis, two exact endpoints followed by ``K``
+    sine bands of the residual pinned at both ends.  The waveform is therefore projected onto
+    ``[M0, M1, sine bands]`` -- the two gradient moments first, which a motion-compensated
+    waveform makes vanish -- and the gradient steps back through the adjoint of that same map.
+    """
 
     def __init__(self, pack, direction, gamma):
-        # Positions are stored one tensor per axis (pos_x/pos_y/pos_z); read them through the engine's
-        # accessor rather than a legacy `dct_coeffs` attribute, which packs no longer carry.
-        from dmipy_sim.compression import read_position_coeffs
-        C = read_position_coeffs(pack.arrays, dtype=np.float64)    # (n_walkers, K, 3)
-        self.K = C.shape[1]
-        self.Cd = C @ np.asarray(direction, np.float64)           # (n_walkers, K)  = C . d
+        from dmipy_sim.compression import read_position_coeffs, require_position_method
+        require_position_method(pack.method)
+        C = read_position_coeffs(pack.arrays, dtype=np.float64)   # (n_walkers, K+2, 3)
+        # bands, not the stored width: the leading two coefficients are endpoints, and treating
+        # them as bands would project the waveform onto a basis it was never expanded in
+        self.K = C.shape[1] - 2
+        self.Cd = C @ np.asarray(direction, np.float64)           # (n_walkers, K+2) = C . d
         self.w = np.asarray(pack.spin_weights, np.float64)
         self.W0 = self.w.sum()
         self.dt = float(pack.dt)
         self.n_t = int(pack.n_t)
+        self.tau = np.arange(self.n_t) / (self.n_t - 1.0)
         self.gamma = gamma
+
+    def _project(self, g):
+        """g (n_t,) -> [M0, M1, sine bands] (K+2,), the basis the coefficients live in."""
+        bands = dst(g[1:-1], type=1, norm="ortho")[: self.K]
+        return np.concatenate([[g.sum(), float(self.tau @ g)], bands])
+
+    def _project_adjoint(self, y):
+        """Transpose of :meth:`_project`: (K+2,) -> (n_t,), for the chain rule back to g."""
+        out = y[0] * np.ones(self.n_t) + y[1] * self.tau
+        padded = np.zeros(self.n_t - 2)
+        padded[: self.K] = y[2:]
+        out[1:-1] += idst(padded, type=1, norm="ortho")
+        return out
 
     def E_and_grad(self, g):
         "Return (E, dE/dg) for the 1-axis waveform g (n_t,)."
-        ghat = dct(g, type=2, norm="ortho")[: self.K]             # (K,)
+        ghat = self._project(g)                                   # (K+2,)
         phi = self.gamma * self.dt * (self.Cd @ ghat)             # (n_walkers,)
         e = np.exp(1j * phi)
         we = self.w * e
@@ -84,12 +105,9 @@ class _PackForward:
         if absS < 1e-12:
             return 0.0, np.zeros_like(g)
         # dE/dghat_k = (gamma dt / |S|) Re( conj(S) * i * sum_i we_i Cd_{i,k} )
-        acc = (we[:, None] * self.Cd).sum(0)                      # (K,) = sum_i we_i Cd_{i,k}
+        acc = (we[:, None] * self.Cd).sum(0)                      # (K+2,)
         dE_dghat = (self.gamma * self.dt / absS) * np.real(np.conj(S) * 1j * acc) / self.W0
-        # dE/dg = idct of the (K-truncated, zero-padded) dE/dghat  (DCT-II ortho is orthogonal)
-        padded = np.zeros(self.n_t); padded[: self.K] = dE_dghat
-        dE_dg = idct(padded, type=2, norm="ortho")
-        return float(absS), dE_dg
+        return float(absS), self._project_adjoint(dE_dghat)
 
 
 def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0), G_max=0.08,
