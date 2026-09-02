@@ -304,14 +304,22 @@ def _solve(Xf, Xk, envelope, dt, steps, restarts, rng, warm_start=None, echo=Non
     return float(best[j]), prob.flatten(bestG[j]), prob
 
 
-def sup_replay_error(traj, K, envelope, dt, *, steps=200, restarts=3, seed=0,
+def sup_replay_error(traj, K, envelope, dt, *, steps=300, restarts=64, seed=0,
                      warm_start=None, decoded=None, holdout=False, echo=None, n_jobs=1):
     """The sup of Eq. (4): worst-case ``|S_full(G) - S_K(G)|`` over ``G_scanner``.
 
-    Returns a :class:`SupResult` whose ``sup`` is a **lower bound** on the true sup -- SQP on a
-    non-concave objective finds a local optimum, so more restarts can only raise it. It
+    Returns a :class:`SupResult` whose ``sup`` is a **lower bound** on the true sup -- ascent on
+    a non-concave objective finds a local optimum, so more restarts can only raise it. It
     therefore PROVES K insufficient when it exceeds ``eps``, and is evidence rather than proof
     when it does not.
+
+    ``restarts`` defaults high because batching made it free: the restarts advance together in
+    one GEMM, so 64 of them cost the same wall clock as 6 (measured: 39.1 s vs 39.0 s on a
+    601-step, 5k-walker walk). Sweeping Magnus from 6 to 64 restarts raised the K=16 sup from
+    5.5e-2 to 5.3e-1 -- the low counts were simply missing the good optima -- while leaving the
+    K that decides the certificate unmoved (K_min = 96 throughout) and turning the
+    non-monotonicity warning off. A cheap search is the difference between a bound you can
+    defend and one you hope holds.
     """
     X = np.asarray(traj, np.float32)
     Xk = _truncate(X, K) if decoded is None else np.asarray(decoded, np.float32)
@@ -341,7 +349,7 @@ def sup_replay_error(traj, K, envelope, dt, *, steps=200, restarts=3, seed=0,
 
 
 def k_min(traj, envelope, dt, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 256),
-          steps=200, restarts=3, seed=0, holdout=False, echo=None, n_jobs=1, verbose=False):
+          steps=300, restarts=64, seed=0, holdout=False, echo=None, n_jobs=1, verbose=False):
     """Smallest K in ``K_grid`` whose certificate meets ``eps``, with the per-K evidence.
 
     K is decided by ``sup`` (the certificate), never by ``held_out``: the pack has to be safe
