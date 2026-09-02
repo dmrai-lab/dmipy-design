@@ -85,6 +85,8 @@ class WaveformProblem:
     slew_rate_max: float
     constraints: list
     bounds: list
+    _null_M1: bool = False
+    _null_M2: bool = False
 
     @property
     def n_free(self):
@@ -108,6 +110,48 @@ class WaveformProblem:
     def flatten(self, dJdg):
         """Fold a per-sample gradient ``(n_t, n_axes)`` back to the flat variable layout."""
         return dJdg[self.free, :].T.reshape(-1)
+
+    def project(self, x, n_iter=8, per_axis=True):
+        """Retract ``x`` into the same feasible set, for first-order solvers.
+
+        The set is exposed two ways on purpose. `constraints`/`bounds` hand it to SQP, which
+        holds it EXACTLY and is what the NOW designer wants for its ~420-variable problems.
+        This hands the same set to a projected first-order method, which is what certification
+        needs: a certificate is taken over the whole walk, so n_t is 601-1001 rather than 140,
+        SQP's QP subproblem is O(n^3) in the 1800-3000 variables that implies, and it stops
+        being usable well before that. Same set, two interfaces -- which is the point, since a
+        certificate over a different set than the designer can reach would be unsound.
+
+        Moment nulling is affine, the slew limit a band and the amplitude limit a box, so all
+        three are convex and alternating projection converges to the intersection. The slew step
+        is a forward rate-limit rather than the exact Euclidean projection onto the band, so this
+        is a retraction: every returned waveform is feasible, but it is not the nearest feasible
+        point. That is sound for a certificate (the sup is taken over feasible waveforms only)
+        and is why the ascent, not the projection, is asked to push back to the limits.
+        """
+        import numpy as np
+        g = self.gradient(x) if np.ndim(x) == 1 else np.array(x, float)
+        t = np.arange(self.n_t) * self.dt
+        basis = [self.sign[:, 0]]
+        for order, on in ((1, self._null_M1), (2, self._null_M2)):
+            if on:
+                basis.append((t ** order) * self.sign[:, 0])
+        Q, _ = np.linalg.qr(np.stack(basis, 1))
+        for _ in range(n_iter):
+            g = g - Q @ (Q.T @ g)
+            for _ in range(3):
+                d = np.clip(np.diff(g, axis=0), -self.slew_rate_max * self.dt,
+                            self.slew_rate_max * self.dt)
+                g = np.concatenate([g[:1], g[:1] + np.cumsum(d, axis=0)], axis=0)
+            if per_axis:
+                g = np.clip(g, -self.G_max, self.G_max)
+            else:
+                n = np.linalg.norm(g, axis=1, keepdims=True)
+                g = g * np.minimum(1.0, self.G_max / np.maximum(n, 1e-30))
+        g = g - Q @ (Q.T @ g)
+        mask = np.zeros(self.n_t, bool); mask[self.free] = True
+        g[~mask] = 0.0                                  # nothing outside the encoding window
+        return self.flatten(g)
 
 
 def waveform_problem(*, n_t, n_axes, dt, echo, encoding_mask=None, G_max=0.08,
@@ -150,4 +194,5 @@ def waveform_problem(*, n_t, n_axes, dt, echo, encoding_mask=None, G_max=0.08,
                          "jac": (lambda A: lambda x: A)(A)})
     return WaveformProblem(n_t=n_t, n_axes=na, dt=dt, free=free, sign=s, G_max=G_max,
                            slew_rate_max=slew_rate_max, constraints=cons,
-                           bounds=[(-G_max, G_max)] * (na * nf))
+                           bounds=[(-G_max, G_max)] * (na * nf),
+                           _null_M1=bool(null_M1), _null_M2=bool(null_M2))
