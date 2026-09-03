@@ -48,7 +48,8 @@ from .constraints import waveform_problem
 GAMMA = 267.513e6  # rad/s/T
 
 __all__ = ["ReplayEnvelope", "replay_envelope", "SupResult", "Certificate",
-           "sup_replay_error", "k_min", "certify", "k_for_walk"]
+           "PoolCertificate", "sup_replay_error", "k_min", "certify",
+           "certify_pools", "k_for_walk"]
 
 
 @dataclass(frozen=True)
@@ -451,6 +452,14 @@ def certify(traj, envelope, dt, *, eps=5e-3, K_grid=(4, 8, 16, 24, 32, 48, 64, 9
         idx = np.random.default_rng(seed).choice(X.shape[0], int(subsample), replace=False)
         X = np.ascontiguousarray(X[np.sort(idx)])
     T = (X.shape[1] - 1) * float(dt)
+    if X.shape[0] < _N_SUP_CONVERGED:
+        warnings.warn(
+            f"certifying from {X.shape[0]:,} walkers, below the ~{_N_SUP_CONVERGED:,} where the "
+            f"sup was measured to converge. The adversary partly fits the particular realisation, "
+            f"so f_c here is INFLATED, not merely noisy (measured 1.5-4x on 3-pool white matter), "
+            f"and K will be over-provisioned with nothing else to signal it. A pack built to a "
+            f"5e-3 Monte-Carlo floor carries ~116,000 walkers and clears this comfortably; "
+            f"diagnostic walks do not.", RuntimeWarning, stacklevel=2)
     K, sups = k_min(X, envelope, dt, eps=eps, K_grid=K_grid, seed=seed, **kw)
     if K is None:
         raise ValueError(
@@ -460,3 +469,95 @@ def certify(traj, envelope, dt, *, eps=5e-3, K_grid=(4, 8, 16, 24, 32, 48, 64, 9
     return Certificate(f_c=K / (2.0 * T), K=int(K), T=T, eps=float(eps),
                        envelope=envelope.describe(), nyquist=1.0 / (2.0 * float(dt)),
                        sups=sups, n_walkers=int(X.shape[0]))
+
+
+# ─────────────────────────────────────────────────────────── per-pool certificates
+# The sup converges in walker count, and below this it is INFLATED rather than merely noisy:
+# measured on a 3-pool CACTUS walk (connectom / prisma / magnus, mixture), f_c reads
+# 480/1918/>3836 Hz at N=1000 and 320/320/959 Hz once converged, so an under-sampled certificate
+# silently over-provisions K by 1.5-4x with nothing to signal it. Convergence lands by ~5,000 on
+# every class measured. A pack built to a Monte-Carlo floor of sigma* = 5e-3 needs ~116,000
+# walkers (the floor falls as 1/sqrt(N); 0.0155 measured at 12,042), so production packs clear
+# this by more than 20x -- it is diagnostic walks that get caught.
+_N_SUP_CONVERGED = 5000
+
+
+@dataclass
+class PoolCertificate:
+    """What a pack promises for the WHOLE ensemble and for each subset a consumer can select.
+
+    A single mixture certificate is not enough, because the mixture is genuinely easier than its
+    parts. Two effects stack. The obvious one is dilution: a pool's error enters the pack signal
+    weighted by its walker fraction. The subtler one is that the adversary must choose ONE
+    waveform, and each pool's worst case is a different waveform, so
+
+        sup_G |sum_p w_p e_p(G)|  <  sum_p w_p sup_G |e_p(G)|
+
+    strictly, whenever the argmaxes differ. Measured on 3-pool white matter at K=48 (Prisma):
+    pools 6.1e-3 (extra) and 7.1e-3 (intra) give a diluted sum of 5.9e-3, against a mixture sup
+    of 3.7e-3 -- another 37% below, which is the pools' errors partly cancelling in phase.
+
+    So a consumer who filters to one compartment is NOT covered by the mixture row: on that same
+    class the pools need 480 Hz where the mixture needs 240. Packs carry compartment labels and
+    support filtered replay, so the certificate is a table and ``k_store`` is sized by its worst
+    row, not by the ensemble.
+    """
+
+    rows: dict                      # name -> Certificate ("mixture" plus one per pool)
+    n_walkers: int
+
+    @property
+    def binding(self):
+        """The row that sizes the pack: the worst selectable subset, not the ensemble."""
+        return max(self.rows.items(), key=lambda kv: kv[1].f_c)
+
+    @property
+    def f_c(self):
+        return self.binding[1].f_c
+
+    def for_pool(self, name):
+        """The certificate a consumer replaying only ``name`` is entitled to quote."""
+        if name not in self.rows:
+            raise KeyError(f"no certificate for {name!r}; have {sorted(self.rows)}")
+        return self.rows[name]
+
+    def k_store(self, T, dt_save=None):
+        """Modes a pack over ``T`` must store so EVERY selectable subset is covered."""
+        return k_for_walk(self.f_c, T, dt_save)
+
+    def describe(self):
+        name, cert = self.binding
+        return dict(binding_pool=name, f_c_hz=self.f_c, n_walkers=self.n_walkers,
+                    rows={k: v.describe() for k, v in self.rows.items()})
+
+
+def certify_pools(traj, envelope, dt, *, labels, names=None, eps=5e-3, min_walkers=200, **kw):
+    """Certify the mixture AND each selectable pool, returning the table a pack should carry.
+
+    ``labels`` is the per-walker compartment id (the pack's ``comp``/``comp0`` channel); ``names``
+    maps id -> name, defaulting to the id. Pools smaller than ``min_walkers`` are skipped rather
+    than certified badly.
+
+    Sizing a pack from the mixture alone under-certifies compartment-filtered replay -- see
+    :class:`PoolCertificate`. Use ``result.k_store(T)``, which reads the worst row.
+    """
+    traj = np.asarray(traj)
+    labels = np.asarray(labels)
+    if len(labels) != len(traj):
+        raise ValueError(f"labels {labels.shape} do not match {len(traj)} walkers")
+    names = names or {}
+    rows = {"mixture": certify(traj, envelope, dt, eps=eps, **kw)}
+    for lab in np.unique(labels):
+        m = labels == lab
+        if int(m.sum()) < min_walkers:
+            warnings.warn(
+                f"pool {names.get(int(lab), int(lab))!r} has {int(m.sum())} walkers, below "
+                f"min_walkers={min_walkers}; skipped rather than certified from too few.",
+                RuntimeWarning, stacklevel=2)
+            continue
+        nm = names.get(int(lab), str(int(lab)))
+        try:
+            rows[nm] = certify(np.ascontiguousarray(traj[m]), envelope, dt, eps=eps, **kw)
+        except ValueError as e:
+            raise ValueError(f"pool {nm!r}: {e}") from None
+    return PoolCertificate(rows=rows, n_walkers=int(len(traj)))

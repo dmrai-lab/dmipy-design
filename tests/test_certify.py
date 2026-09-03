@@ -175,3 +175,60 @@ def test_subsample_is_conservative_not_optimistic():
     full = sup_replay_error(X, 16, env, DT, **FAST)[0].sup
     sub = sup_replay_error(np.ascontiguousarray(X[:200]), 16, env, DT, **FAST)[0].sup
     assert sub >= full * 0.5, f"subsampled sup {sub:.2e} far below full-ensemble {full:.2e}"
+
+
+def test_it_warns_when_certifying_from_too_few_walkers():
+    """Below the convergence knee the sup is INFLATED, not merely noisy, so K comes out
+    over-provisioned with nothing else to signal it. Silence there would be the worst outcome:
+    a confident certificate that is simply too large."""
+    X = walk(n_w=300, n_t=161)
+    env = replay_envelope(G_max=0.08, slew_rate_max=200.0, name="t")
+    with pytest.warns(RuntimeWarning, match="below the ~5,000"):
+        certify(X, env, DT, eps=2e-2, K_grid=(8, 16, 32, 64), **FAST)
+
+
+def test_the_pool_table_is_sized_by_its_worst_row_not_the_mixture():
+    """The mixture is genuinely easier than its parts -- dilution, plus the adversary being
+    unable to be worst-case for every pool with one waveform. A pack sized on the mixture would
+    under-certify anyone replaying a single compartment, which packs support."""
+    from dmipy_design.certify import certify_pools, PoolCertificate
+    rng = np.random.default_rng(7)
+    # two pools with deliberately different mobility, plus a frozen one
+    fast = np.cumsum(rng.normal(0, np.sqrt(2 * D0 * DT), (400, 161, 3)), axis=1)
+    slow = np.cumsum(rng.normal(0, np.sqrt(2 * D0 * DT) * 0.3, (400, 161, 3)), axis=1)
+    frozen = np.zeros((200, 161, 3)) + rng.normal(0, 1e-6, (200, 1, 3))
+    X = np.concatenate([fast, slow, frozen]).astype(np.float32)
+    lab = np.concatenate([np.zeros(400, int), np.ones(400, int), np.full(200, 2)])
+    env = replay_envelope(G_max=0.08, slew_rate_max=200.0, name="t")
+    with pytest.warns(RuntimeWarning):                      # low-N, expected for a fast test
+        pc = certify_pools(X, env, DT, labels=lab, names={0: "fast", 1: "slow", 2: "frozen"},
+                           eps=2e-2, K_grid=(8, 16, 32, 64, 128), **FAST)
+    assert isinstance(pc, PoolCertificate)
+    assert set(pc.rows) == {"mixture", "fast", "slow", "frozen"}
+    # the frozen pool costs nothing; the mobile one binds
+    assert pc.rows["frozen"].f_c <= pc.rows["fast"].f_c
+    # sizing reads the WORST row, so it is never below the mixture's own requirement
+    T = (X.shape[1] - 1) * DT
+    assert pc.k_store(T) >= pc.rows["mixture"].k_for(T)
+    assert pc.binding[0] in pc.rows
+    assert pc.for_pool("fast") is pc.rows["fast"]
+    with pytest.raises(KeyError, match="no certificate"):
+        pc.for_pool("nonexistent")
+
+
+def test_a_pool_too_small_to_certify_is_skipped_not_guessed():
+    from dmipy_design.certify import certify_pools
+    X = walk(n_w=420, n_t=161)
+    lab = np.concatenate([np.zeros(400, int), np.ones(20, int)])   # 20 is too few
+    env = replay_envelope(G_max=0.08, slew_rate_max=200.0, name="t")
+    with pytest.warns(RuntimeWarning):
+        pc = certify_pools(X, env, DT, labels=lab, eps=2e-2, K_grid=(8, 16, 32, 64),
+                           min_walkers=200, **FAST)
+    assert "1" not in pc.rows and "0" in pc.rows
+
+
+def test_pool_labels_must_match_the_walkers():
+    from dmipy_design.certify import certify_pools
+    env = replay_envelope(G_max=0.08, slew_rate_max=200.0, name="t")
+    with pytest.raises(ValueError, match="do not match"):
+        certify_pools(walk(n_w=100), env, DT, labels=np.zeros(7, int), **FAST)
