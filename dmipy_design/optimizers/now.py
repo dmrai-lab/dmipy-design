@@ -166,13 +166,14 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
     slew_off, echo = timing.masks(TE, n_t)
     enc = np.asarray(slew_off)[:, 0] > 0.5
     dt = TE / (n_t - 1); echo = int(echo)
-    # erode encoding windows by the ramp length so g ramps from 0 at the window edges
-    nr = max(1, int(np.ceil(G_max / (slew_rate_max * dt))))
-    er = enc.copy()
-    for j in range(1, nr + 1):
-        er &= np.roll(enc, j) & np.roll(enc, -j)
-    free = np.where(er)[0]; nf = len(free); nvar = na * nf
-    s = np.where(np.arange(n_t) < echo, 1.0, -1.0)[:, None]
+    # The deliverable set (amplitude box, slew band, refocusing, M1/M2) is shared with the
+    # replay certificate in `certify.py` -- it has to be the SAME set, or the certificate is
+    # taken over waveforms this designer can step outside of. See constraints.waveform_problem.
+    from ..constraints import waveform_problem
+    prob = waveform_problem(n_t=n_t, n_axes=na, dt=dt, echo=echo, encoding_mask=enc,
+                            G_max=G_max, slew_rate_max=slew_rate_max,
+                            null_M1=null_M1, null_M2=null_M2)
+    free, nf, nvar, s = prob.free, prob.n_free, prob.n_var, prob.sign
     tt = (np.arange(n_t) * dt)[:, None]
     bscale = (GAMMA * G_max) ** 2 * TE ** 3 / 50.0
 
@@ -189,20 +190,7 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         gx = (2 * GAMMA * dt ** 2 * s * Qrev)[free, :].T.reshape(-1)
         return -b / bscale, -gx / bscale
 
-    # ---- constant LINEAR-constraint matrices (x axis-major: x[k*nf + i]) ----
-    Sel = sp.csr_matrix((np.ones(nf), (free, np.arange(nf))), shape=(n_t, nf))
-    D = sp.diags([-np.ones(n_t), np.ones(n_t - 1)], [0, 1], shape=(n_t - 1, n_t))
-    A_slew = sp.block_diag([(D @ Sel) / dt] * na).toarray()
-    cons = [{"type": "ineq", "fun": lambda x: slew_rate_max - A_slew @ x, "jac": lambda x: -A_slew},
-            {"type": "ineq", "fun": lambda x: slew_rate_max + A_slew @ x, "jac": lambda x: A_slew},
-            {"type": "eq", "fun": (lambda A: (lambda x: A @ x))(sp.block_diag([(GAMMA * dt * s[free, 0]).reshape(1, -1)] * na).toarray()),
-             "jac": (lambda A: (lambda x: A))(sp.block_diag([(GAMMA * dt * s[free, 0]).reshape(1, -1)] * na).toarray())}]
-    if null_M1:
-        A = sp.block_diag([((tt * s)[free, 0] * dt).reshape(1, -1)] * na).toarray()
-        cons.append({"type": "eq", "fun": (lambda A: lambda x: A @ x)(A), "jac": (lambda A: lambda x: A)(A)})
-    if null_M2:
-        A = sp.block_diag([((tt ** 2 * s)[free, 0] * dt).reshape(1, -1)] * na).toarray()
-        cons.append({"type": "eq", "fun": (lambda A: lambda x: A @ x)(A), "jac": (lambda A: lambda x: A)(A)})
+    cons = list(prob.constraints)          # slew band, refocusing, M1/M2
 
     # ---- nonlinear: b-tensor SHAPE + optional Maxwell, with ANALYTIC Jacobians ----
     # Constant normalization (not /trace) so the constraint is a pure quadratic form in g and
@@ -271,7 +259,7 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
             for k in range(na): v[k * nf:(k + 1) * nf] = -2 * g[free, k] / hscale
             return v[None, :]
         cons.append({"type": "ineq", "fun": c_heat, "jac": j_heat})
-    bounds = [(-G_max, G_max)] * nvar                         # amplitude box
+    bounds = prob.bounds                                      # amplitude box
 
     rng = np.random.default_rng(seed); edge = np.sin(np.linspace(0, np.pi, nf))
     # OGSE init oscillates near the target; bracket the lobe count symmetrically about the rough
