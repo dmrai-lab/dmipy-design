@@ -9,6 +9,11 @@ exactly the waveforms this package can produce).
 import numpy as np
 import pytest
 
+# `certify` reaches into dmipy-sim for the bridge codec and the cited scanner catalogue,
+# so it belongs to the same optional tier as `replay_design` -- the `core` CI job installs
+# neither. Same guard that test_replay_design.py uses.
+pytest.importorskip("dmipy_sim")
+
 from dmipy_design.certify import (replay_envelope, sup_replay_error, k_min, certify,
                                   k_for_walk, ReplayEnvelope, Certificate, SupResult,
                                   _truncate, _objective, GAMMA)
