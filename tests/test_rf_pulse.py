@@ -3,7 +3,8 @@ import numpy as np
 import pytest
 
 from dmipy_design.optimizers import design_refocusing_rf, RfPulseDesign
-from dmipy_design.optimizers.rf_pulse import _inversion_mz, GAMMA
+from dmipy_design.optimizers.rf_pulse import _inversion_mz
+from dmipy_sim.constants import GAMMA
 
 
 def _design(**kw):
@@ -107,11 +108,11 @@ def test_times_axis_is_centred():
     assert t.shape == d.B1.shape and t.mean() == pytest.approx(0.0, abs=1e-12)
 
 
-# ── dmipy-sim bridge (needs the [sim] extra with B1Pulse) ─────────────────────
+# ── dmipy-sim bridge ────────────────────────────────────────────────────────────
 _HAS_B1PULSE = False
 _HAS_BIR4 = False
 try:
-    from dmipy_sim.rf import B1Pulse, bloch_simulate  # noqa: F401
+    from dmipy_sim.acquisition.rf import B1Pulse, bloch_simulate  # noqa: F401
     _HAS_B1PULSE = True
     _HAS_BIR4 = hasattr(B1Pulse, "bir4")
 except Exception:
@@ -136,3 +137,14 @@ def test_to_b1pulse_round_trips_into_sim():
     for b1 in (0.7, 1.0, 1.3):                                  # inverts across B1⁺ in sim
         _, Mz = bloch_simulate(p, df_hz=0.0, b1_scale=b1)
         assert float(Mz[0]) < -0.8
+
+
+def test_to_rf_event_puts_the_designed_pulse_in_a_schedule():
+    from dmipy_sim.acquisition.rf import RFEvent, RFSchedule
+    d = _design(n_b1=5, n_off_resonance=5, n_mu=6)
+    e = d.to_rf_event(20e-3)
+    assert isinstance(e, RFEvent) and e.label == "refocus"
+    assert e.flip_deg == pytest.approx(np.degrees(e.envelope.nominal_flip_rad)) and e.flip_deg > 180.0   # an adiabatic passage
+    assert e.duration_s == pytest.approx(d.rf_duration) and e.envelope is not None
+    sched = RFSchedule([RFEvent(0.0, 90, "Mz→Mxy"), e])
+    assert sched.refocus_time == pytest.approx(20e-3)

@@ -12,13 +12,17 @@ linearly interpolated between them. NumPy/SciPy only (no autodiff, no JAX), matc
 """
 import numpy as np
 
-__all__ = ["pgse_response_lut", "best_discriminating_pgse", "discriminability_matrix"]
+__all__ = ["pgse_response_lut", "lut_pgse", "best_discriminating_pgse", "discriminability_matrix"]
 
 
-def _pgse_G(n_t, dt, amp, delta, Delta, direction):
-    g = np.zeros((n_t, 3)); nd = max(1, int(round(delta / dt))); ng = int(round(Delta / dt))
-    u = np.asarray(direction, float); g[:nd] = amp * u; g[ng:ng + nd] = -amp * u
-    return g
+def lut_pgse(pack, b_grid, *, delta, Delta, direction=(1.0, 0.0, 0.0)):
+    """The PGSE family a LUT is built over, on ``pack``'s save grid: dmipy-sim's square PGSE, one measurement
+    per b in ``b_grid``, the pair centred in the pack's window."""
+    from dmipy_sim.sequences import pgse
+    n_t, dt = int(pack.n_t), float(pack.dt)
+    b_grid = np.asarray(b_grid, float)
+    return pgse(np.tile(np.asarray(direction, float), (len(b_grid), 1)), delta, Delta, bvalues=b_grid,
+                TE=(n_t - 1) * dt, n_t=n_t, slew_rate=np.inf)
 
 
 def pgse_response_lut(packs, b_grid, *, delta=None, Delta=None, direction=(1.0, 0.0, 0.0)):
@@ -33,10 +37,9 @@ def pgse_response_lut(packs, b_grid, *, delta=None, Delta=None, direction=(1.0, 
         raise ValueError("all packs must share the save grid (dt, n_t)")
     delta = delta if delta is not None else 0.25 * (n_t - 1) * dt
     Delta = Delta if Delta is not None else min((n_t - 2) * dt, delta + 0.5 * (n_t - 1) * dt)
-    bu = (GAMMA * delta) ** 2 * (Delta - delta / 3)
     b_grid = np.asarray(b_grid, float)
-    # one waveform per b (shared across packs); compile per pack K
-    G = np.stack([_pgse_G(n_t, dt, np.sqrt(b / bu), delta, Delta, direction) for b in b_grid])  # (n_b,n_t,3)
+    # one sequence, one measurement per b (shared across packs); compile per pack K
+    G = np.asarray(lut_pgse(packs[0], b_grid, delta=delta, Delta=Delta, direction=direction).G_eff, np.float64)
     E = np.zeros((len(packs), len(b_grid)))
     for i, p in enumerate(packs):
         E[i] = replay_signal(p, compile_scheme(G, dt, p.K, GAMMA, n_t=p.n_t))

@@ -79,7 +79,7 @@ def test_the_certificate_is_taken_over_the_same_set_the_designer_optimises_over(
     """
     from dmipy_design.optimizers.now import design_waveform_now
     G_max, slew = 0.08, 200.0
-    d = design_waveform_now(b_delta=1.0, G_max=G_max, slew_rate_max=slew, TE=0.06, n_t=120,
+    d = design_waveform_now(b_delta=1.0, limits=(G_max, slew), TE=0.06, n_t=120,
                             null_M1=False, null_M2=False, n_restarts=2, maxiter=60)
     env = replay_envelope(G_max=G_max, slew_rate_max=slew, name="shared")
     prob = env.problem(d.G.shape[0], d.dt, echo=d.echo_idx)

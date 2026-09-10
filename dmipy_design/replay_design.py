@@ -10,14 +10,12 @@ NumPy/SciPy-only by design: fully numpy-analytic derivatives → SciPy L-BFGS-B,
 First use case: **shape/size discrimination** — given two packs (e.g. a cylinder and a sphere, or two
 diameters), find the deliverable waveform that maximally separates their signals, ``max_g |E_A - E_B|``.
 
-The signal of one 1-axis waveform ``g(t)`` (direction ``d`` fixed) against a pack with DCT coefficients
-``C`` (n_walkers, K, 3) and weights ``w`` is, with ``ghat = DCT(g)[:K]`` and ``Cd = C . d``,
+The signal of one 1-axis waveform ``g(t)`` (direction ``d`` fixed) against a pack is dmipy-sim's own replay
+forward: ``phi_i = C_i . W(g)`` with ``C`` the pack's position coefficients and ``W(g) = M g`` the waveform's
+mode-space projection (``dmipy_sim.replay.compile_scheme``, LINEAR in ``g``), ``E = |<w exp(i phi)>| / sum(w)``,
+and the analytic gradient chains back through ``M``:
 
-    phi_i = gamma * dt * sum_k Cd_{i,k} ghat_k,   S = <w exp(i phi)>/<w>,   E = |S|,
-
-and the analytic gradient chains back through the (linear) projection to ``g``:
-
-    dE/dghat_k = (gamma dt / |S|) * Re( conj(S) * i * <w exp(i phi) Cd_{:,k}> ),   dE/dg = P^T (dE/dghat), P the projection above.
+    dE/dW = (1/|S|) Re( conj(S) * i * <w exp(i phi) C> ) / W0,   dE/dg = M^T dE/dW.
 
 Substrate set: the Substrate Commons canonical replay dataset (cylinders / spheres / planes,
 0.1-20 um). Orientation convention: anisotropic packs (cylinder/plane) are replayed in their canonical
@@ -27,10 +25,11 @@ given — the discriminating axis for shape/size contrast.
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.fft import dst, idst
 from scipy.optimize import minimize
 
 __all__ = ["load_pack", "design_discriminating_waveform", "DiscriminationResult"]
+
+_MIN_SLEW_PENALTY = 1e-3
 
 
 def load_pack(path):
@@ -51,35 +50,36 @@ class DiscriminationResult:
     te: float = None         # encoding window used [s] (None = full pack window)
     max_slew: float = None   # realized peak slew [T/m/s]
 
-
-def _bvalue(g_axis, dt, gamma):
-    q = gamma * np.cumsum(np.asarray(g_axis, float)) * dt
-    return float(np.sum(q * q) * dt)
+    def to_sequence(self):
+        """The designed waveform as a dmipy-sim ``ScannerSequence``: a self-refocusing gradient echo (no pulse
+        is folded; the structural refocusing of the design makes it refocus on its own)."""
+        from dmipy_sim.sequences import from_waveform
+        return from_waveform(np.asarray(self.G, np.float32)[None], self.dt, self.direction[None])
 
 
 class _PackForward:
-    """Analytic E(g) and dE/dg for one pack along a fixed direction, at fixed (dt, n_t, gamma).
+    """Analytic E(g) and dE/dg for one pack along a fixed direction: dmipy-sim's own replay forward.
 
-    Packs store positions as ``bridge_dst``: per axis, two exact endpoints followed by ``K``
-    sine bands of the residual pinned at both ends.  The waveform is therefore projected onto
-    ``[M0, M1, sine bands]`` -- the two gradient moments first, which a motion-compensated
-    waveform makes vanish -- and the gradient steps back through the adjoint of that same map.
+    The pack replays a waveform through its compiled scheme, ``phi_i = C_i . W(g)`` with ``C`` the pack's
+    position coefficients (``dmipy_sim.replay.compression.read_position_coeffs``) and ``W(g)`` the waveform's
+    mode-space projection (``dmipy_sim.replay.compile_scheme``), which is LINEAR in ``g``: ``W(g) = M g`` with
+    ``M`` the compiled unit impulses along the direction. So ``E(g)`` is exactly what ``pack.replay`` returns
+    for the same waveform, and ``dE/dg = M^T dE/dW`` is closed-form -- no autodiff, no second copy of the
+    replay mathematics here.
     """
 
     def __init__(self, pack, direction, gamma):
-        from dmipy_sim.compression import read_position_coeffs, require_position_method
-        require_position_method(pack.method)
-        C = read_position_coeffs(pack.arrays, dtype=np.float64)   # (n_walkers, K+2, 3)
-        # bands, not the stored width: the leading two coefficients are endpoints, and treating
-        # them as bands would project the waveform onto a basis it was never expanded in
-        self.K = C.shape[1] - 2
-        self.Cd = C @ np.asarray(direction, np.float64)           # (n_walkers, K+2) = C . d
-        self.w = np.asarray(pack.spin_weights, np.float64)
-        self.W0 = self.w.sum()
+        from dmipy_sim.replay import compile_scheme
+        from dmipy_sim.replay.compression import read_position_coeffs
         self.dt = float(pack.dt)
         self.n_t = int(pack.n_t)
-        self.tau = np.arange(self.n_t) / (self.n_t - 1.0)
-        self.gamma = gamma
+        d = np.asarray(direction, np.float64)
+        C = read_position_coeffs(pack.arrays, dtype=np.float64)       # (n_walkers, K+2, 3)
+        self.Cflat = C.reshape(C.shape[0], -1)                       # (n_walkers, 3(K+2))
+        basis = np.eye(self.n_t)[:, :, None] * d[None, None, :]      # the unit impulses along d, (n_t, n_t, 3)
+        self.M = compile_scheme(basis, self.dt, pack.K, gamma, n_t=self.n_t)   # (3(K+2), n_t): W(g) = M g
+        self.w = np.asarray(pack.spin_weights, np.float64)
+        self.W0 = self.w.sum()
 
     def _project(self, g):
         """g (n_t,) -> [M0, M1, sine bands] (K+2,), the basis the coefficients live in."""
@@ -96,23 +96,21 @@ class _PackForward:
 
     def E_and_grad(self, g):
         "Return (E, dE/dg) for the 1-axis waveform g (n_t,)."
-        ghat = self._project(g)                                   # (K+2,)
-        phi = self.gamma * self.dt * (self.Cd @ ghat)             # (n_walkers,)
-        e = np.exp(1j * phi)
-        we = self.w * e
+        phi = self.Cflat @ (self.M @ np.asarray(g, np.float64))     # (n_walkers,)
+        we = self.w * np.exp(1j * phi)
         S = we.sum() / self.W0
         absS = np.abs(S)
         if absS < 1e-12:
-            return 0.0, np.zeros_like(g)
-        # dE/dghat_k = (gamma dt / |S|) Re( conj(S) * i * sum_i we_i Cd_{i,k} )
-        acc = (we[:, None] * self.Cd).sum(0)                      # (K+2,)
-        dE_dghat = (self.gamma * self.dt / absS) * np.real(np.conj(S) * 1j * acc) / self.W0
-        return float(absS), self._project_adjoint(dE_dghat)
+            return 0.0, np.zeros(self.n_t)
+        # dE/dW_c = (1/|S|) Re( conj(S) * i * sum_i we_i C_{i,c} ) / W0 ;  dE/dg = M^T dE/dW
+        acc = self.Cflat.T @ we                                      # (3(K+2),)
+        dE_dW = np.real(np.conj(S) * 1j * acc) / (absS * self.W0)
+        return float(absS), self.M.T @ dE_dW
 
 
-def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0), G_max=0.08,
-                                   te=None, slew_max=None, n_basis=16, n_restarts=4, maxiter=300,
-                                   seed=0, refocus_weight=50.0, slew_weight=1e-3):
+def design_discriminating_waveform(pack_a, pack_b, *, limits, direction=(1.0, 0.0, 0.0),
+                                   te=None, n_basis=16, n_restarts=4, maxiter=300,
+                                   seed=0, refocus_weight=50.0, slew_weight=_MIN_SLEW_PENALTY):
     """Design a single deliverable gradient waveform that maximally discriminates ``pack_a`` from
     ``pack_b`` (both :class:`dmipy_sim.replay.ReplayPack`), i.e. ``max_g |E_A(g) - E_B(g)|``.
 
@@ -122,13 +120,18 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
     (``|g| <= G_max`` via tanh). Optimized by SciPy L-BFGS-B with the analytic gradient (no autodiff),
     warm-started from the best plain PGSE (a cold start sits at ~zero contrast gradient), multi-restart.
 
-    ``te`` restricts the encoding to a window ``[0, te]`` (the waveform is zero after; the echo forms at
-    ``te`` — the pack's TE-prefix property), which bounds ``b`` to a realistic range. ``slew_max`` [T/m/s]
-    adds a soft slew penalty so the waveform is scanner-deliverable (the smooth basis already band-limits
-    slew; this bounds it explicitly). Both packs must share the save grid (``dt``, ``n_t``); ``K`` may
-    differ. Returns a :class:`DiscriminationResult`.
+    ``limits`` (a :class:`~dmipy_sim.acquisition.scanners.ScannerLimits`, or anything ``ScannerLimits.of``
+    resolves) bounds the amplitude (``|g| <= G_max`` via tanh) and adds a soft slew penalty at its slew rate so
+    the waveform is scanner-deliverable (the smooth basis already band-limits slew; this bounds it explicitly).
+    ``te`` restricts the encoding to a window ``[0, te]`` (the waveform is zero after; the echo forms at ``te`` --
+    the pack's TE-prefix property), which bounds ``b`` to a realistic range. Both packs must share the save
+    grid (``dt``, ``n_t``); ``K`` may differ. Returns a :class:`DiscriminationResult`.
     """
+    from dmipy_sim.acquisition.scanners import ScannerLimits
+    from dmipy_sim.acquisition.waveforms import b_from_gradient
     from dmipy_sim.constants import GAMMA
+    limits = ScannerLimits.of(limits)
+    G_max, slew_max = float(limits.G_max), float(limits.slew_max)
 
     if abs(pack_a.dt - pack_b.dt) > 1e-12 or pack_a.n_t != pack_b.n_t:
         raise ValueError("packs must share the save grid (dt, n_t)")
@@ -144,6 +147,7 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
     if te is not None:
         te_idx = min(n_t, max(2, int(round(te / dt))))
         mask = np.zeros(n_t); mask[:te_idx] = 1.0                 # encode only within [0, te]
+    mask[-1] = 0.0                                                # the readout sample acts over nothing
 
     def g_of(c):
         raw = B @ c
@@ -151,7 +155,7 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
 
     def _slew_pen_and_grad(g):
         "Soft penalty for |dg/dt| exceeding slew_max: sum relu(|s|-slew_max)^2, with its dpen/dg."
-        if slew_max is None:
+        if not np.isfinite(slew_max):
             return 0.0, np.zeros_like(g)
         s = np.diff(g) / dt                                       # (n_t-1,)
         over = np.maximum(np.abs(s) - slew_max, 0.0)
@@ -197,9 +201,16 @@ def design_discriminating_waveform(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0),
         if best is None or res.fun < best.fun:
             best = res
     g_final, _ = g_of(best.x)
+    # the soft refocusing term leaves q(TE) at ~1e-3 of its peak; the sequence a designer hands on must refocus
+    # exactly, so the net moment is removed along a smooth half-sine over the window (zero at both edges, so
+    # no step is introduced) -- a change below the optimizer's own tolerance -- and the contrast reported is
+    # that of the waveform actually returned
+    on = mask > 0
+    h = np.where(on, np.sin(np.pi * (np.arange(n_t) + 0.5) / max(1, on.sum())), 0.0)
+    g_final = g_final - (g_final.sum() / h.sum()) * h
     Ea = fa.E_and_grad(g_final)[0]; Eb = fb.E_and_grad(g_final)[0]
     G = g_final[:, None] * d[None, :]
     max_slew = float(np.abs(np.diff(g_final) / dt).max())
     return DiscriminationResult(G=G, dt=dt, direction=d, contrast=abs(Ea - Eb),
-                                E_A=Ea, E_B=Eb, b_value=_bvalue(g_final, dt, GAMMA),
+                                E_A=Ea, E_B=Eb, b_value=float(b_from_gradient(G[None], dt)[0]),
                                 te=(te if te is not None else (n_t - 1) * dt), max_slew=max_slew)
