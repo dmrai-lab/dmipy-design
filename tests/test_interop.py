@@ -14,9 +14,11 @@ pytest.importorskip("dmipy_fit")
 import dmipy_sim as ds
 from dmipy_design import ScannerLimits, design_waveform_now
 
-_fit = pytest.importorskip("dmipy_fit", minversion="3.0",
-                           reason="dmipy-fit consumes dmipy-sim's ScannerSequence from its 3.0 line on "
-                                  "(dmipy-sim#173 piece 8); an older fit speaks another object")
+import inspect as _inspect
+from dmipy_fit.core.acquisition_scheme import AcquisitionScheme as _Scheme
+if "sequence" not in _inspect.signature(_Scheme.__init__).parameters:
+    pytest.skip("dmipy-fit consumes dmipy-sim's ScannerSequence once AcquisitionScheme(sequence) reads it "
+                "(dmipy-sim#173 piece 8, dmipy-fit#27); this fit speaks another object", allow_module_level=True)
 from dmipy_fit.core.acquisition_scheme import AcquisitionScheme
 from dmipy_fit.core.modeling_framework import MultiCompartmentModel
 from dmipy_fit.signal_models.gaussian_models import G1Ball

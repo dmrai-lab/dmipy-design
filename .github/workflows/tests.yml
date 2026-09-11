@@ -39,14 +39,14 @@ jobs:
 
   interop:
     # cross-package: a designed waveform -> dmipy-sim simulates -> dmipy-fit recovers it.
-    # Pulls the published dmipy-sim + dmipy-fit — also guards against interface drift as they
-    # release independently.
+    # Pulls dmipy-sim and dmipy-fit from their git mains until the 3.0 line ships on PyPI — also
+    # guards against interface drift as they release independently.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@main"
+      - run: pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@main" "dmipy-fit @ git+https://github.com/dmrai-lab/dmipy-fit@main"
       - run: pip install -e ".[interop,dev]" "jax[cpu]"
       - run: pytest -q tests/test_interop.py
