@@ -1,44 +1,8 @@
-"""
-Hardware and time constraints for acquisition design.
+"""Scan-time constraints. A scanner's gradient and RF limits are data with a citation and live in dmipy-sim's
+catalogue (:class:`dmipy_sim.acquisition.scanners.ScannerLimits`); every designer here takes one as ``limits``.
 """
 
 from dataclasses import dataclass
-
-
-@dataclass
-class HardwareConstraints:
-    """MRI scanner hardware constraints.
-
-    Parameters
-    ----------
-    G_max : float
-        Maximum gradient amplitude in T/m.  Typical values:
-        standard 3T: 0.04–0.08 T/m; Connectom 3T: 0.30 T/m.
-    slew_rate_max : float
-        Maximum slew rate in T/m/s.
-    TE_min : float
-        Minimum echo time in seconds (hardware/SAR constraint).
-    TE_max : float
-        Maximum echo time in seconds.
-    """
-    G_max: float = 0.08          # T/m  (standard 3T Prisma)
-    slew_rate_max: float = 200.0  # T/m/s
-    TE_min: float = 0.060         # s
-    TE_max: float = 0.200         # s
-
-    def gradient_for_b(self, b: float, delta: float, Delta: float) -> float:
-        """Compute gradient amplitude required for a given b-value and timing."""
-        import numpy as np
-        GAMMA = 2.675e8  # rad/s/T
-        denom = GAMMA ** 2 * delta ** 2 * (Delta - delta / 3.0)
-        if denom <= 0:
-            return float("inf")
-        return float(np.sqrt(b / denom))
-
-    def is_feasible(self, b: float, delta: float, Delta: float) -> bool:
-        """Return True if the (b, delta, Delta) combination is hardware-feasible."""
-        G = self.gradient_for_b(b, delta, Delta)
-        return G <= self.G_max and delta < Delta
 
 
 @dataclass
@@ -165,8 +129,8 @@ def waveform_problem(*, n_t, n_axes, dt, echo, encoding_mask=None, G_max=0.08,
     """
     import numpy as np
     import scipy.sparse as sp
+    from dmipy_sim.constants import GAMMA
 
-    GAMMA = 267.513e6
     enc = (np.ones(n_t, bool) if encoding_mask is None else np.asarray(encoding_mask, bool))
     nr = max(1, int(np.ceil(G_max / (slew_rate_max * dt))))
     er = enc.copy()

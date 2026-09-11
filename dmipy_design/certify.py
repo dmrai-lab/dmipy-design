@@ -43,9 +43,8 @@ import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
+from dmipy_sim.constants import GAMMA
 from .constraints import waveform_problem
-
-GAMMA = 267.513e6  # rad/s/T
 
 __all__ = ["ReplayEnvelope", "replay_envelope", "SupResult", "Certificate",
            "PoolCertificate", "sup_replay_error", "k_min", "certify",
@@ -69,7 +68,7 @@ class ReplayEnvelope:
         """The shared :class:`~dmipy_design.constraints.WaveformProblem` for this class.
 
         ``echo=None`` means the trajectory is read by an ALREADY-EFFECTIVE waveform (the 180 is
-        folded in, as ``dmipy_sim.compression.acquisition_battery`` builds them), so the sign is
+        folded in, as ``dmipy_sim.replay.compression.acquisition_battery`` builds them), so the sign is
         +1 throughout and the refocusing constraint reduces to nulling M0. Pass an echo index
         for a literal spin-echo layout.
         """
@@ -98,15 +97,11 @@ def replay_envelope(model=None, *, G_max=None, slew_rate_max=None, raster=10e-6,
     ``replay_envelope(G_max=1.0, slew_rate_max=1e4, name='insert-1T/m')``.
     """
     if model is not None:
-        from dmipy_sim.sequences.scanner_constants import gradient_limits, get_limit
-        g, s = gradient_limits(model, regime=regime)
-        try:
-            raster = get_limit(model, "gradient", "gradient_raster_time", si=True)
-        except (KeyError, ValueError):
-            pass
-        return ReplayEnvelope(name or model, g, s, raster, null_M1, null_M2, n_axes,
-                              dict(source="scanner_constants.json", model=model,
-                                   slew_regime=regime))
+        from dmipy_sim.acquisition.scanners import ScannerLimits
+        lim = ScannerLimits.of(model, regime=regime)
+        return ReplayEnvelope(name or model, lim.G_max, lim.slew_max,
+                              raster if lim.grad_raster is None else lim.grad_raster, null_M1, null_M2, n_axes,
+                              dict(source="dmipy_sim.acquisition.scanners", model=lim.name, slew_regime=regime))
     if G_max is None or slew_rate_max is None:
         raise ValueError("give a catalogue `model`, or both `G_max` and `slew_rate_max`")
     return ReplayEnvelope(name or f"custom-{G_max*1e3:.0f}mT/m", float(G_max),
@@ -154,7 +149,7 @@ def _truncate(X, K):
     wall clock. The cost is a ~1e-5 relative phase error, three orders below the eps this
     certifies against.
     """
-    from dmipy_sim.compression import encode_bridge_dst, decode_bridge_dst
+    from dmipy_sim.replay.compression import encode_bridge_dst, decode_bridge_dst
     arrays, meta, _ = encode_bridge_dst(np.asarray(X, np.float64), K)
     return np.asarray(decode_bridge_dst(arrays, meta), np.float32)
 

@@ -21,6 +21,13 @@ never dwarfed, so the b-value reaches the true optimum (rides slew=S_max and |G|
 Covers LTE / PTE / STE (b_delta = 1 / -0.5 / 0) and OGSE (pass ``spectral_freq``: a rank-1
 shape plus one extra equality pinning the encoding's RMS frequency, f_rms = target).  Single
 solver, all shapes -- the LTE problem is just the rank-1 case, OGSE the rank-1 + spectral case.
+
+What the solver optimises INSIDE -- the scanner's limits, the timing budget, the encoding windows -- is
+dmipy-sim's: :class:`~dmipy_sim.acquisition.scanners.ScannerLimits` (the cited catalogue, with the SAFE
+coefficients the PNS constraint reads) and :class:`~dmipy_sim.acquisition.timing.SequenceTiming` read on the
+grid by :mod:`.timing`. What it produces is dmipy-sim's acquisition object: ``NowDesign.to_sequence()`` is
+:func:`~dmipy_sim.sequences.builders.from_btensor_waveform` (or ``from_pgste_waveform`` for a stimulated echo)
+of the designed physical gradient, carrying the budget it was built to.
 """
 from __future__ import annotations
 import numpy as np
@@ -28,36 +35,30 @@ import scipy.sparse as sp
 from scipy.optimize import minimize
 from dataclasses import dataclass
 
-GAMMA = 267.513e6  # rad/s/T
+from dmipy_sim.acquisition.scanners import ScannerLimits
+from dmipy_sim.constants import GAMMA
 
-# SAFE PNS coefficients (Hebrank/Szczepankiewicz model) -- pypulseq's representative
-# Siemens-class example.  Per axis: tau1/2/3 (ms), a1/2/3, stim_limit, g_scale.  The
-# in-design constraint shapes the waveform; pulseq_pns_report verifies the exact .asc on export.
-_SAFE_HW = (
-    dict(tau1=0.2, tau2=0.03, tau3=3.0, a1=0.4, a2=0.1, a3=0.5, stim_limit=30.0, g_scale=0.35),
-    dict(tau1=1.5, tau2=2.5, tau3=0.15, a1=0.55, a2=0.15, a3=0.3, stim_limit=15.0, g_scale=0.31),
-    dict(tau1=2.0, tau2=0.12, tau3=1.0, a1=0.42, a2=0.4, a3=0.18, stim_limit=25.0, g_scale=0.25),
-)
+from .timing import DEFAULT_TIMING, encoding_mask
 
 
-def _safe_kernels(dt_ms, m):
+def _safe_kernels(dt_ms, m, safe_hw):
     """(9, m) causal RC-lowpass kernels (3 axes x 3 taus): alpha*(1-alpha)^k, alpha=dt/(tau+dt)."""
     kers = []
-    for hw in _SAFE_HW:
-        for tau in (hw['tau1'], hw['tau2'], hw['tau3']):
+    for hw in safe_hw:
+        for tau in (hw['tau1_ms'], hw['tau2_ms'], hw['tau3_ms']):
             alpha = dt_ms / (tau + dt_ms)
             kers.append(alpha * (1.0 - alpha) ** np.arange(m))
     return np.asarray(kers)
 
 
-def _pns_pct(G3, dt, kernels):
+def _pns_pct(G3, dt, kernels, safe_hw):
     """Per-timepoint SAFE PNS (% of stimulation limit) of physical gradient G3 (n_t,3 T/m):
     3 RC-lowpass terms per axis, normalized, L2-combined across axes -- same model as
     pypulseq's calculate_pns.  Returns the (m,) time series (caller takes max / constrains all)."""
     dgdt = np.diff(G3, axis=0) / dt                            # (m,3) T/m/s
     m = dgdt.shape[0]; pns_sq = np.zeros(m)
     for ax in range(3):
-        hw = _SAFE_HW[ax]; d = dgdt[:, ax]; k = 3 * ax
+        hw = safe_hw[ax]; d = dgdt[:, ax]; k = 3 * ax
         lp1 = np.convolve(d, kernels[k + 0])[:m]
         lp2 = np.convolve(np.abs(d), kernels[k + 1])[:m]
         lp3 = np.convolve(d, kernels[k + 2])[:m]
@@ -109,9 +110,11 @@ def _validate_b_delta(b_delta):
 
 @dataclass
 class NowDesign:
-    G: np.ndarray            # (n_t, 3) physical gradient, T/m
+    G: np.ndarray            # (n_t, 3) PHYSICAL gradient, T/m
     dt: float
-    echo_idx: int
+    echo_idx: int            # the sample the effective gradient's sign flips at: the 180, or a stimulated echo's recall
+    TE: float
+    timing: object           # the SequenceTiming the design was built to
     b_value: float           # s/m²
     b_delta: float         # requested shape; validated on entry, so also the achieved one
     n_axes: int
@@ -123,56 +126,67 @@ class NowDesign:
     m2_index: float
     maxwell_index: float
     feasible: bool
+    limits: object = None       # the ScannerLimits the design was built under
     spectral_rms: float = 0.0   # Hz, RMS encoding frequency (OGSE); 0 for non-oscillating
     pns_pct: float = 0.0        # %, peak SAFE PNS (% of stimulation limit); 0 if not constrained
     heat_frac: float = 0.0      # mean gradient energy ⟨g²⟩ as a fraction of G_max²
+    store_idx: int = None       # a stimulated echo's store sample (None for a spin echo)
+    recall_idx: int = None      # ... and its recall sample
+
+    def to_sequence(self, b_target=None):
+        """The design as dmipy-sim's acquisition object, built to its budget: a spin echo through
+        :func:`~dmipy_sim.sequences.builders.from_btensor_waveform` (the 180 at TE/2), a stimulated echo through
+        :func:`~dmipy_sim.sequences.builders.from_pgste_waveform` (store, TM, recall). ``b_target`` (s/m²)
+        rescales the amplitude (b ∝ |G|²; the b-tensor shape and refocusing are invariant under the rescale)."""
+        from dmipy_sim.sequences import from_btensor_waveform, from_pgste_waveform
+        G = np.asarray(self.G, np.float64)
+        if b_target is not None:
+            G = G * np.sqrt(float(b_target) / self.b_value)
+        if self.store_idx is not None:
+            return from_pgste_waveform(G[None], self.dt, store_idx=self.store_idx, recall_idx=self.recall_idx,
+                                       timing=self.timing)
+        return from_btensor_waveform(G[None], self.dt, echo_idx=self.echo_idx, timing=self.timing)
 
     def effective_G(self):
-        """Effective (sign-folded) gradient — what dmipy-sim's b-from-waveform eats."""
-        s = np.where(np.arange(self.G.shape[0]) < self.echo_idx, 1.0, -1.0)[:, None]
-        return self.G * s
-
-    def to_sim_waveform(self, b_target=None):
-        """Build a dmipy-sim ``Waveform`` (effective gradient, echo at TE) for MC.
-
-        ``b_target`` (s/m²) optionally rescales the amplitude (b ∝ |G|²; the b-tensor
-        shape and refocusing are invariant under the rescale), so a NOW design drops
-        straight into the dmipy-sim forward / mc bridge.
-        """
-        from dmipy_sim.waveforms import Waveform
-        G = self.effective_G()
-        if b_target is not None:
-            G = G * np.sqrt(b_target / self.b_value)
-        return Waveform(G=G[None].astype(np.float32), dt=self.dt,
-                        echo_idx=self.G.shape[0] - 1)
+        """The effective (sign-folded) gradient ``(n_t, 3)``: what the phase integral walks."""
+        return np.asarray(self.to_sequence().G_eff, np.float64)[0]
 
 
-def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.060, n_t=140,
-                        timing=None, null_M1=True, null_M2=True, maxwell=False,
-                        spectral_freq=None, pns=False, pns_target=80.0, heat_eta=None,
-                        n_axes=None, n_restarts=8, maxiter=300, seed=0):
-    """Design a max-b spin-echo gradient waveform via NOW's SQP recipe (LTE/PTE/STE).
+def design_waveform_now(b_delta=1.0, *, limits, TE=0.060, n_t=140, timing=DEFAULT_TIMING, symmetric=False,
+                        **design_kwargs):
+    """Design a max-b spin-echo gradient waveform via NOW's SQP recipe (``b_delta`` one of the three realisable
+    shapes, ``SUPPORTED_SHAPES``: 1.0 LTE, 0.0 STE, -0.5 PTE -- anything else raises rather than returning another
+    shape; OGSE with ``spectral_freq``) under ``limits`` -- a :class:`~dmipy_sim.acquisition.scanners.ScannerLimits`, or anything
+    ``ScannerLimits.of`` resolves (``"siemens_prisma"``, ``"connectom"``, an explicit ``(G_max, slew)``).
 
-    ``b_delta`` must be one of the three realisable shapes -- ``1.0`` (LTE), ``0.0`` (STE) or ``-0.5``
-    (PTE); anything else raises ``ValueError`` rather than returning a different shape (see
-    ``SUPPORTED_SHAPES``).  ``timing`` is a ``SequenceTiming``; if None a default Prisma budget is used.
-    Returns a ``NowDesign`` with the physical gradient and the (machine-precision) constraint residuals.
+    ``timing`` is the :class:`~dmipy_sim.acquisition.timing.SequenceTiming` budget the encoding windows follow
+    from (:func:`~dmipy_design.optimizers.timing.encoding_mask`; ``symmetric`` mirrors them about the echo).
+    The remaining keywords are the core's (``null_M1``, ``null_M2``, ``maxwell``, ``spectral_freq``, ``pns``,
+    ``pns_target``, ``heat_eta``, ``n_axes``, ``n_restarts``, ``maxiter``, ``seed``). Returns a
+    :class:`NowDesign` with the physical gradient and the (machine-precision) constraint residuals.
     """
-    from .timing import SequenceTiming
+    on, echo = encoding_mask(timing, TE, n_t, symmetric=symmetric)
+    return _design_in_mask(b_delta, limits=limits, TE=float(timing.resolve_TE(TE)), n_t=n_t, on=on, sign_idx=echo,
+                           timing=timing, **design_kwargs)
+
+
+def _design_in_mask(b_delta, *, limits, TE, n_t, on, sign_idx, timing, store_idx=None, recall_idx=None,
+                    null_M1=True, null_M2=True, maxwell=False, spectral_freq=None, pns=False, pns_target=80.0,
+                    heat_eta=None, n_axes=None, n_restarts=8, maxiter=300, seed=0):
+    """The NOW core: maximise b inside the encoding mask ``on`` (``(n_t, 1)``) with the effective gradient's sign
+    flipping at ``sign_idx``, under ``limits``."""
     b_delta = _validate_b_delta(b_delta)
-    if timing is None:
-        timing = SequenceTiming(t_excite=3e-3, t_refocus=6e-3, t_readout_pre_echo=14e-3)
+    limits = ScannerLimits.of(limits)
+    G_max, slew_rate_max = float(limits.G_max), float(limits.slew_max)
     na = _rank_of(b_delta) if n_axes is None else int(n_axes)
-    slew_off, echo = timing.masks(TE, n_t)
-    enc = np.asarray(slew_off)[:, 0] > 0.5
-    dt = TE / (n_t - 1); echo = int(echo)
-    # The deliverable set (amplitude box, slew band, refocusing, M1/M2) is shared with the
-    # replay certificate in `certify.py` -- it has to be the SAME set, or the certificate is
-    # taken over waveforms this designer can step outside of. See constraints.waveform_problem.
+    enc = np.asarray(on)[:, 0] > 0.5
+    dt = TE / (n_t - 1); echo = int(sign_idx)
+    # The deliverable set (amplitude box, slew band, refocusing, M1/M2) is shared with the replay certificate in
+    # `certify.py` -- it has to be the SAME set, or the certificate is taken over waveforms this designer can step
+    # outside of. See constraints.waveform_problem.
     from ..constraints import waveform_problem
     prob = waveform_problem(n_t=n_t, n_axes=na, dt=dt, echo=echo, encoding_mask=enc,
-                            G_max=G_max, slew_rate_max=slew_rate_max,
-                            null_M1=null_M1, null_M2=null_M2)
+                            G_max=G_max, slew_rate_max=slew_rate_max, null_M1=null_M1, null_M2=null_M2)
     free, nf, nvar, s = prob.free, prob.n_free, prob.n_var, prob.sign
     tt = (np.arange(n_t) * dt)[:, None]
     bscale = (GAMMA * G_max) ** 2 * TE ** 3 / 50.0
@@ -244,11 +258,15 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
                 dD[k * nf:(k + 1) * nf] = 2 * GAMMA * dt * s[free, 0] * Qrev[free, k]
             return (GAMMA ** 2 * (dN * Dq - N * dD) / Dq ** 2 / wt2)[None, :]
         cons.append({"type": "eq", "fun": c_spec, "jac": j_spec})
+    safe_hw = None
     if pns:                                                   # SAFE PNS <= pns_target % at every t
-        pkern = _safe_kernels(dt * 1e3, n_t - 1)              # physical gradient = g (not s·g)
+        safe_hw = limits.safe_model                           # the catalogue's coefficients; the solver is here
+        if safe_hw is None:
+            raise ValueError("pns=True needs the SAFE coefficients, which dmipy-sim's catalogue does not carry")
+        pkern = _safe_kernels(dt * 1e3, n_t - 1, safe_hw)     # physical gradient = g (not s·g)
         def c_pns(x):                                         # one row per timepoint, all >= 0
             G3 = np.zeros((n_t, 3)); G3[:, :na] = gof(x)
-            return pns_target - _pns_pct(G3, dt, pkern)       # FD Jacobian (nvar evals, cheap conv)
+            return pns_target - _pns_pct(G3, dt, pkern, safe_hw)   # FD Jacobian (nvar evals, cheap conv)
         cons.append({"type": "ineq", "fun": c_pns})
     if heat_eta is not None:                                  # coil heating: ⟨g²⟩ <= heat_eta·G_max²
         hscale = n_t * heat_eta * G_max ** 2
@@ -284,17 +302,17 @@ def design_waveform_now(b_delta=1.0, *, G_max=0.08, slew_rate_max=200.0, TE=0.06
         frms = float(GAMMA * np.sqrt(np.sum(g ** 2) / (np.sum(q ** 2) + 1e-30)) / (2 * np.pi))
         spec_ok = spectral_freq is None or abs(frms - spectral_freq) / spectral_freq < 5e-2
         G3 = np.zeros((n_t, 3)); G3[:, :na] = g
-        pns_pk = float(np.max(_pns_pct(G3, dt, _safe_kernels(dt * 1e3, n_t - 1)))) if pns else 0.0
+        pns_pk = float(np.max(_pns_pct(G3, dt, _safe_kernels(dt * 1e3, n_t - 1, safe_hw), safe_hw))) if pns else 0.0
         heatf = float(np.sum(g ** 2) / (n_t * G_max ** 2))
         feas = (refoc < 1e-2 and sl <= slew_rate_max * 1.02 and amp <= G_max * 1.02
                 and (na < 2 or shape < 5e-2) and (not null_M1 or m1 < 5e-2)
                 and (not null_M2 or m2 < 5e-2) and (not maxwell or mx < 2e-2) and spec_ok
                 and (not pns or pns_pk <= pns_target * 1.02)
                 and (heat_eta is None or heatf <= heat_eta * 1.02))
-        cand = NowDesign(G=G3, dt=dt, echo_idx=echo, b_value=b, b_delta=float(b_delta), n_axes=na,
-                         max_slew=sl, max_amplitude=amp, refocus_residual=refoc, shape_residual=shape,
-                         m1_index=m1, m2_index=m2, maxwell_index=mx, feasible=feas, spectral_rms=frms,
-                         pns_pct=pns_pk, heat_frac=heatf)
+        cand = NowDesign(G=G3, dt=dt, echo_idx=echo, TE=float(TE), timing=timing, b_value=b, b_delta=float(b_delta),
+                         n_axes=na, max_slew=sl, max_amplitude=amp, refocus_residual=refoc, shape_residual=shape,
+                         m1_index=m1, m2_index=m2, maxwell_index=mx, feasible=feas, limits=limits,
+                         spectral_rms=frms, pns_pct=pns_pk, heat_frac=heatf, store_idx=store_idx, recall_idx=recall_idx)
         if feas and (best is None or b > best.b_value):
             best = cand
     return best if best is not None else cand

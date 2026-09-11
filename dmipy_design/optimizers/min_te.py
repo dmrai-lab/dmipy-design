@@ -12,9 +12,10 @@ scan.
 from __future__ import annotations
 
 from .now import design_waveform_now, _validate_b_delta
+from .timing import DEFAULT_TIMING
 
 
-def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
+def min_te_for_b(b_target, b_delta=1.0, *, limits, timing=DEFAULT_TIMING, te_lo=None, te_hi=None,
                  te_max=0.25, tol_te=1e-3, n_seeds=1, verbose=False, **design_kwargs):
     """Smallest TE whose max-b NOW design reaches ``b_target`` (the SNR-optimal mode).
 
@@ -24,8 +25,11 @@ def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
         Required b-value (s/m²).
     b_delta : float
         Target b-tensor shape (1 LTE, 0 STE, -0.5 PTE), passed to ``design_waveform_now``.
-    timing : SequenceTiming or None
-        The timing budget; its ``min_TE()`` is the hard lower floor for the bracket.
+    limits : ScannerLimits (or what ``ScannerLimits.of`` resolves)
+        The scanner's limits, from dmipy-sim's catalogue.
+    timing : SequenceTiming
+        The timing budget (:data:`~dmipy_design.optimizers.timing.DEFAULT_TIMING` when not given); its
+        ``min_TE()`` is the hard lower floor for the bracket.
     te_lo, te_hi : float or None
         Optional TE bracket (s).  Defaults: ``te_lo`` = the timing floor (else 1 ms);
         ``te_hi`` is grown ×1.5 until ``b_target`` is reached.
@@ -37,9 +41,8 @@ def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
         Design each TE over this many restart-RNG seeds and keep the best feasible (max b),
         so ``b(TE)`` is robust to seed-to-seed optimizer variance on tight problems.
     **design_kwargs
-        Forwarded to ``design_waveform_now`` (``G_max``, ``slew_rate_max``, ``n_t``,
-        ``n_restarts``, ``null_M1``/``null_M2``/``maxwell``, ``spectral_freq``, ``pns`` …;
-        any ``seed`` is overridden by the ``n_seeds`` sweep).
+        Forwarded to ``design_waveform_now`` (``n_t``, ``n_restarts``, ``null_M1``/``null_M2``/``maxwell``,
+        ``spectral_freq``, ``pns`` …; any ``seed`` is overridden by the ``n_seeds`` sweep).
 
     Returns
     -------
@@ -56,7 +59,7 @@ def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
         best = None
         for s in range(max(1, n_seeds)):
             try:
-                d = design_waveform_now(b_delta, TE=te, timing=timing, seed=s, **dkw)
+                d = design_waveform_now(b_delta, limits=limits, TE=te, timing=timing, seed=s, **dkw)
             except ValueError:
                 continue                                  # TE below the encoding-window floor
             if best is None or (bool(d.feasible), d.b_value) > (bool(best.feasible),
@@ -72,7 +75,7 @@ def min_te_for_b(b_target, b_delta=1.0, *, timing=None, te_lo=None, te_hi=None,
                   f"feasible={best.feasible}  -> {'reaches' if ok else 'short'}")
         return ok, best
 
-    floor = timing.min_TE() if timing is not None else 1e-3
+    floor = timing.min_TE()
     lo = max(float(te_lo) if te_lo is not None else floor, floor)
     ok_lo, d_lo = reached(lo)
     if ok_lo:

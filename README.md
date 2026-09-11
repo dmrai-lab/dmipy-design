@@ -27,8 +27,11 @@ scanner-runnable Pulseq `.seq`.
 - **Pulseq I/O** (`dmipy_design.pulseq_export`). Export a design to a scanner-runnable spin-echo
   `.seq` on real vendor limits, and run the offline acceptance checks (timing, realized
   Gmax/slew, b-tensor round-trip, PNS via the SAFE model).
-- **Scanner constraints** (`HardwareConstraints`, `TimeConstraints`, and the SAFE PNS model in
-  the NOW solver); the full vendor catalogue (`PULSEQ_SYSTEMS`) comes from dmipy-sim.
+- **Scanner limits are data, not numbers here.** Every designer takes `limits=` -- dmipy-sim's cited
+  `ScannerLimits` (`ScannerLimits.of("siemens_prisma")`, a certificate class, or an explicit `(G_max, slew)`
+  envelope); the SAFE PNS *solver* lives in NOW, the coefficients it reads come with the limits. What a
+  designer produces is dmipy-sim's acquisition object: `design.to_sequence()` is a `ScannerSequence` built
+  to its timing budget, the thing dmipy-sim simulates, replays and exports.
 
 **Scope (instant-pulse):** RF pulses are ideal and instantaneous. Finite-RF-pulse optimization
 and CRLB/Fisher-information experiment design are **not** part of this package.
@@ -36,28 +39,28 @@ and CRLB/Fisher-information experiment design are **not** part of this package.
 ## Install
 
 ```bash
-pip install dmipy-design                 # NOW + timing + PGSTE (NumPy/SciPy only)
-pip install "dmipy-design[sim]"          # + dmipy-sim bridge (to_sim_waveform, from_pulseq)
+pip install dmipy-design                 # NOW + timing + PGSTE (NumPy/SciPy + dmipy-sim, the object)
 pip install "dmipy-design[pulseq]"       # + scanner-runnable .seq export (pypulseq)
 ```
 
 ## Quickstart
 
 ```python
-from dmipy_design import design_waveform_now, SequenceTiming
+from dmipy_design import design_waveform_now, ScannerLimits, SequenceTiming
 
 # a real timing budget from a readout (partial Fourier shortens the post-180 window)
 timing = SequenceTiming.from_readout(t_excite=2e-3, t_refocus=6e-3,
                                      readout_duration=30e-3, partial_fourier=0.75)
+prisma = ScannerLimits.of("siemens_prisma")          # 80 mT/m, 200 T/m/s, cited
 
-# max-b LTE waveform under Prisma-class limits, with M1/M2 nulled (default)
-d = design_waveform_now(b_delta=1.0, G_max=0.08, slew_rate_max=200.0,
-                        TE=0.08, timing=timing)
+# max-b LTE waveform under Prisma limits, with M1/M2 nulled (default)
+d = design_waveform_now(b_delta=1.0, limits=prisma, TE=0.08, timing=timing)
 print(d.b_value, d.feasible, d.max_slew, d.refocus_residual)
+seq = d.to_sequence()                                # dmipy-sim's ScannerSequence: simulate / replay / export it
 
 # STE (isotropic) and an OGSE-like waveform at ~80 Hz
-ste  = design_waveform_now(b_delta=0.0, TE=0.08)
-ogse = design_waveform_now(b_delta=1.0, TE=0.08, spectral_freq=80.0)
+ste  = design_waveform_now(b_delta=0.0, limits=prisma, TE=0.08)
+ogse = design_waveform_now(b_delta=1.0, limits=prisma, TE=0.08, spectral_freq=80.0)
 
 # PGSTE with a long mixing time
 from dmipy_design import design_stimulated_echo

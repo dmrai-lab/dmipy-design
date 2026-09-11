@@ -6,28 +6,29 @@ import numpy.testing as npt
 import pytest
 
 pytest.importorskip("dmipy_sim")
-from scipy.fft import dct
-from dmipy_sim.replay import ReplayPack, compile_scheme, replay_signal
-from dmipy_sim.compression import pack_position_arrays
+from dmipy_sim.replay import compile_scheme, replay_signal
 from dmipy_sim.constants import GAMMA
-from dmipy_design.replay_lut import (pgse_response_lut, best_discriminating_pgse,
+from dmipy_design.replay_lut import (pgse_response_lut, lut_pgse, best_discriminating_pgse,
                                      discriminability_matrix)
 
 N_W, N_T, K, DT, D0 = 500, 120, 40, 1e-3, 2e-9
 
 
 def _slab_pack(L, seed):
+    """A reflecting-slab (0 <= x <= L) + free y, z walk, packed the way dmipy-sim packs one."""
+    from dmipy_sim.replay.bank import build_replay_pack
     rng = np.random.default_rng(seed)
     step = np.sqrt(2 * D0 * DT); x = rng.uniform(0, L, N_W)
-    traj = np.zeros((N_W, N_T, 3))
+    traj = np.zeros((N_W, N_T, 3)); dlog = np.zeros((N_W, N_T))
     for t in range(N_T):
-        x = x + rng.normal(0, step, N_W); x = np.mod(x, 2 * L); x = np.where(x > L, 2 * L - x, x)
-        traj[:, t, 0] = x
+        x = x + rng.normal(0, step, N_W)
+        lo, hi = x < 0, x > L
+        x = np.where(lo, -x, np.where(hi, 2 * L - x, x))
+        traj[:, t, 0] = x; dlog[:, t] = (lo | hi) * step
     traj[:, :, 1:] = np.cumsum(rng.normal(0, step, (N_W, N_T, 2)), axis=1)
-    traj -= traj.mean(1, keepdims=True)
-    C = dct(traj, type=2, norm="ortho", axis=1)[:, :K, :]
-    return ReplayPack({**pack_position_arrays(C, np.float32), "spin_weights": np.ones(N_W, np.float32)},
-                      {"n_t": N_T, "dt": DT, "walk_params": {"n_t": N_T, "dt_traj": DT}})
+    m = dict(traj=traj, dt_traj=DT, T_max=(N_T - 1) * DT, comp=np.zeros((N_W, N_T), np.int8),
+             comp0=np.zeros(N_W, np.int64), w=np.ones(N_W), dlog_b=dlog, D_intra=D0, n_walkers=N_W, seed=seed)
+    return build_replay_pack(m, id=f"test/slab-{seed}", method="bridge_dst", K=K, license="CC-BY-4.0", citation="test")
 
 
 @pytest.fixture(scope="module")
@@ -41,13 +42,13 @@ def test_lut_matches_replay(family):
     b_grid = np.linspace(0, 4e9, 9)
     E = pgse_response_lut(packs, b_grid, delta=0.25 * (N_T - 1) * DT,
                           Delta=0.7 * (N_T - 1) * DT, direction=(1., 0, 0))
-    # spot-check a node against a direct replay of the same PGSE
+    # spot-check a node against a direct replay of the same PGSE (dmipy-sim's builder on the pack grid)
     dt = packs[0].dt; delta = 0.25 * (N_T - 1) * DT; Delta = 0.7 * (N_T - 1) * DT
-    bu = (GAMMA * delta) ** 2 * (Delta - delta / 3)
-    g = np.zeros((1, N_T, 3)); nd = max(1, int(round(delta / dt))); ng = int(round(Delta / dt))
-    b = b_grid[5]; g[0, :nd, 0] = np.sqrt(b / bu); g[0, ng:ng + nd, 0] = -np.sqrt(b / bu)
-    direct = replay_signal(packs[0], compile_scheme(g, dt, packs[0].K, GAMMA))[0]
+    seq = lut_pgse(packs[0], [b_grid[5]], delta=delta, Delta=Delta, direction=(1., 0, 0))
+    npt.assert_allclose(seq.b(), [b_grid[5]], rtol=1e-6)
+    direct = replay_signal(packs[0], compile_scheme(np.asarray(seq.G_eff, np.float64), dt, packs[0].K, GAMMA))[0]
     npt.assert_allclose(E[0, 5], direct, atol=1e-9)
+    assert packs[0].replay(seq, tissue=False)[0] == pytest.approx(direct, abs=1e-6)   # the pack reads the object too
 
 
 def test_best_discriminating_b(family):

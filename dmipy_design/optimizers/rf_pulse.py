@@ -51,7 +51,7 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.optimize import minimize_scalar
 
-GAMMA = 2.675e8   # rad/s/T, proton gyromagnetic ratio (matches HardwareConstraints)
+from dmipy_sim.constants import GAMMA
 
 
 @dataclass
@@ -118,15 +118,20 @@ class RfPulseDesign:
         return (np.arange(n) - (n - 1) / 2.0) * self.dt
 
     def to_b1pulse(self, label="refocus"):
-        """Build a dmipy-sim ``B1Pulse`` from the designed envelope (needs the ``[sim]`` extra).
+        """The designed envelope as a dmipy-sim ``B1Pulse``: the complex ``B1`` array (Tesla) is the
+        ground-truth transmit waveform, so the pulse drops straight into dmipy-sim's Bloch forward /
+        slice-profile -- the RF mirror of ``NowDesign.to_sequence``."""
+        from dmipy_sim.acquisition.rf import B1Pulse
+        return B1Pulse(b1=self.B1.astype(np.complex128), dt=self.dt, label=label)   # its flip is gamma int |B1| dt
 
-        The complex ``B1`` array (Tesla) is the ground-truth transmit waveform, so the pulse
-        drops straight into dmipy-sim's Bloch forward / slice-profile — the RF mirror of
-        ``NowDesign.to_sim_waveform``.
-        """
-        from dmipy_sim.rf import B1Pulse
-        return B1Pulse(b1=self.B1.astype(np.complex128), dt=self.dt, label=label,
-                       flip_deg=180.0)
+    def to_rf_event(self, t_s, label="refocus", axis_deg=0.0):
+        """The designed pulse as the ``RFEvent`` a ScannerSequence's schedule holds: centred at ``t_s``, its
+        duration and flip those of the envelope it carries (an adiabatic passage's integrated nutation is well
+        over 180 degrees; the LABEL says it refocuses, which is what the coherence bookkeeping reads)."""
+        from dmipy_sim.acquisition.rf import RFEvent
+        pulse = self.to_b1pulse(label)
+        return RFEvent(float(t_s), float(np.degrees(pulse.nominal_flip_rad)), label, axis_deg=float(axis_deg),
+                       duration_s=float(pulse.duration), envelope=pulse)
 
 
 def _hs_envelope(A0, mu, beta, n):

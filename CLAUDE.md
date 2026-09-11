@@ -23,7 +23,7 @@ that export to a scanner via Pulseq.
   optimise a gradient waveform *through* a stored Monte-Carlo substrate by replaying a `.rpk`
   pack (`dmipy_sim.replay`), e.g. `max_g |E_cyl - E_sph|`. Closed-form gradient through the
   DCT + complex mean → SciPy L-BFGS-B (no autodiff), smooth cosine basis + PGSE warm start.
-  The substrate-informed counterpart to NOW's substrate-blind b-maximiser; needs `[sim]`.
+  The substrate-informed counterpart to NOW's substrate-blind b-maximiser.
 
 **NOT here (still out of scope):**
 - CRLB / Fisher-information optimal experiment design.
@@ -40,7 +40,7 @@ constraints expressed the way NOW expresses them — LINEAR matrices (per-axis s
 OGSE-spectral, with **analytic** objective + constraint Jacobians (NO autodiff). One solver, all
 shapes: **LTE / PTE / STE** (`b_delta = 1 / -0.5 / 0`), and **OGSE** via `spectral_freq`. The full
 deliverability set: slew / amplitude / M1 / M2 / shape / Maxwell / spectral / **PNS (SAFE)** /
-**heat (∫g²)**. Returns a `NowDesign` with `.effective_G()` / `.to_sim_waveform()`.
+**heat (∫g²)**. Every designer takes `limits=` (dmipy-sim's `ScannerLimits`: the cited catalogue, whose `safe_model` the PNS constraint reads) and a `timing=` budget (dmipy-sim's `SequenceTiming`; `DEFAULT_TIMING` when none is given). Returns a `NowDesign` whose `.to_sequence()` is dmipy-sim's `ScannerSequence` (`from_btensor_waveform` of the designed physical gradient, built to the budget) and `.effective_G()` its folded gradient.
 
 **Two modes.** `design_waveform_now` maximises b at a **fixed TE**. The inverse —
 `min_te_for_b` (`optimizers/min_te.py`) — gives a *required* b-value the **shortest TE** that
@@ -73,11 +73,12 @@ unequal — the optimum is asymmetric as an *output*. Build from a readout
 
 ## PGSTE (`optimizers/stimulated_echo.py`)
 
-PGSTE reuses the NOW core unchanged (same q / b-tensor); only the structure differs (3×90
-stimulated echo, no 180). `StimulatedEchoTiming` enforces matched transverse periods `τ₁ = τ₃`
-around a gradient-off mixing time TM (long, T1-limited diffusion time). `design_stimulated_echo`
-wraps `design_waveform_now` via the duck-typed `timing`. This module designs the *effective*
-encoding; RF playback of a real 3×90 is out of the instant-pulse scope here.
+PGSTE reuses the NOW core unchanged (same q / b-tensor); only the layout differs (3×90 stimulated
+echo, no 180), and the layout is dmipy-sim's stimulated-echo assembler read on the grid by
+`optimizers/timing.py::stimulated_echo_mask` (matched transverse periods `τ₁ = τ₃` around a gradient-off
+mixing time TM, `TE = 2 t_store + TM`, the sign flip at the recall). `design_stimulated_echo` hands the mask
+to the NOW core; the result's `.to_sequence()` is dmipy-sim's `from_pgste_waveform` of the designed
+gradient, with the three pulses and the budget. RF playback of the 3×90 is dmipy-sim's job.
 
 ## Spectral paradigm (OGSE)
 
@@ -101,12 +102,12 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 |------|------|
 | `optimizers/now.py` | `design_waveform_now`, `NowDesign` — the SQP design oracle (LTE/PTE/STE/OGSE) |
 | `optimizers/min_te.py` | `min_te_for_b` — shortest TE for a target b (SNR-optimal), bisecting NOW |
-| `optimizers/timing.py` | `SequenceTiming` (asymmetric windows), `encoding_spectrum` — NumPy-only, JAX-free |
-| `optimizers/stimulated_echo.py` | `StimulatedEchoTiming`, `design_stimulated_echo` — PGSTE via NOW |
-| `optimizers/rf_pulse.py` | `design_refocusing_rf`, `RfPulseDesign` — B1-robust refocusing RF (adiabatic HS + GRAPE); `warm_start=` accepts a dmipy-sim `B1Pulse` |
+| `optimizers/timing.py` | dmipy-sim's `SequenceTiming` re-exported, `DEFAULT_TIMING`, `encoding_mask` (the spin-echo windows on a grid; `symmetric=` the vanilla waveform), `stimulated_echo_mask`, `encoding_spectrum(seq)` — NumPy-only, JAX-free |
+| `optimizers/stimulated_echo.py` | `design_stimulated_echo` — PGSTE via the NOW core in dmipy-sim's stimulated-echo layout |
+| `optimizers/rf_pulse.py` | `design_refocusing_rf`, `RfPulseDesign` — B1-robust refocusing RF (adiabatic HS + GRAPE); `warm_start=` accepts a dmipy-sim `B1Pulse`; `to_rf_event(t_s)` puts the designed pulse in a schedule |
 | `pulseq_export.py` | `.seq` export + delivery/PNS reports (needs `[pulseq]`) |
-| `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B, `[sim]`) |
-| `constraints.py` | `HardwareConstraints`, `TimeConstraints` |
+| `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B); the result's `to_sequence()` is a self-refocusing gradient echo |
+| `constraints.py` | `TimeConstraints` (scan time); a scanner's limits are dmipy-sim's `ScannerLimits` |
 
 ## Tests
 

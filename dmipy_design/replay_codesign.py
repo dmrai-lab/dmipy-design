@@ -31,14 +31,14 @@ class CoDesignResult:
     contrast_delivered: float   # contrast x refocusing efficiency (the echo-observable contrast)
 
 
-def codesign_waveform_and_b1(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0), G_max=0.08, te=None,
-                             slew_max=None, rf_duration=6e-3, B1_max=20e-6, b1_range=(0.7, 1.3),
+def codesign_waveform_and_b1(pack_a, pack_b, *, limits, direction=(1.0, 0.0, 0.0), te=None,
+                             rf_duration=6e-3, B1_max=20e-6, b1_range=(0.7, 1.3),
                              off_resonance_hz=250.0, grad_kwargs=None, rf_kwargs=None):
     """Co-design a discriminating gradient waveform and a robust refocusing B1 pulse for the pair of
     substrates ``pack_a``/``pack_b``.
 
-    Stage 1 — replay the packs to design the gradient maximizing ``|E_A - E_B|`` (see
-    :func:`dmipy_design.replay_design.design_discriminating_waveform`; ``te``/``slew_max`` make it
+    Stage 1 — replay the packs to design the gradient maximizing ``|E_A - E_B|`` under ``limits`` (see
+    :func:`dmipy_design.replay_design.design_discriminating_waveform`; ``te`` and the limits make it
     deliverable). Stage 2 — design the ``B1``-robust refocusing pulse maximizing the ensemble refocusing
     efficiency over ``(B1⁺ × off-resonance)`` (see
     :func:`dmipy_design.optimizers.rf_pulse.design_refocusing_rf`). The delivered contrast is the ideal
@@ -48,7 +48,7 @@ def codesign_waveform_and_b1(pack_a, pack_b, *, direction=(1.0, 0.0, 0.0), G_max
     from dmipy_design.optimizers.rf_pulse import design_refocusing_rf
 
     grad = design_discriminating_waveform(
-        pack_a, pack_b, direction=direction, G_max=G_max, te=te, slew_max=slew_max,
+        pack_a, pack_b, limits=limits, direction=direction, te=te,
         **(grad_kwargs or {}))
     rf = design_refocusing_rf(
         rf_duration=rf_duration, B1_max=B1_max, b1_range=b1_range,
