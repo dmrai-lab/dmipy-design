@@ -44,6 +44,20 @@ def test_the_ascent_gradient_matches_finite_differences():
         assert abs(fd - g0[i]) <= 1e-3 * max(abs(g0[i]), 1e-6)
 
 
+def test_the_returned_waveform_is_the_one_that_scored_the_sup():
+    """``SupResult.sup`` is attained by ``SupResult.waveform``: re-evaluating the objective on the returned waveform
+    gives the reported sup (dmipy-design#18: the ascent stored the iterate one projected step past the one it
+    scored, which in the regime where the adversary kills the signal was a different waveform altogether -- on
+    Magnus at K = 8 the returned waveform's error was 0.128 against a reported sup of 0.416)."""
+    X = walk()
+    for gmax, slew, K in ((0.3, 200.0, 4), (0.3, 200.0, 32), (3.0, 3000.0, 4), (3.0, 3000.0, 8)):
+        env = replay_envelope(G_max=gmax, slew_rate_max=slew, name="t")             # the last two: the adversary kills
+        r, x = sup_replay_error(X, K, env, DT, seed=1, **FAST)                        # the signal (0.16 reported, 0.09 returned)
+        prob = env.problem(X.shape[1], DT)
+        again = -_objective(prob, X, _truncate(X, K), DT)(x)[0]
+        assert abs(again - r.sup) <= 1e-4 * max(1.0, abs(r.sup)), (K, r.sup, again)     # float32 ascent vs float64 re-read
+
+
 def test_the_winning_waveform_is_actually_deliverable():
     """A sup over waveforms the hardware cannot play certifies nothing at all."""
     X = walk()
