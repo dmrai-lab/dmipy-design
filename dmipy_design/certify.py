@@ -289,13 +289,14 @@ def _solve(Xf, Xk, envelope, dt, steps, restarts, rng, warm_start=None, echo=Non
 
     best = np.zeros(G.shape[0]); bestG = np.array(G, copy=True)
     for _ in range(int(steps)):
+        G_scored = G                                      # `a` is the objective AT this iterate; `_step` returns the next
         G, m, v, a = _step(G, m, v, Xa, Xb)
         an = np.asarray(a)
         imp = an > best
         if imp.any():
-            Gn = np.asarray(G)
+            Gs = np.asarray(G_scored)
             best = np.where(imp, an, best)
-            bestG[imp] = Gn[imp]
+            bestG[imp] = Gs[imp]
     j = int(np.argmax(best))
     return float(best[j]), prob.flatten(bestG[j]), prob
 
