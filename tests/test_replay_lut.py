@@ -15,7 +15,11 @@ N_W, N_T, K, DT, D0 = 500, 120, 40, 1e-3, 2e-9
 
 
 def _slab_pack(L, seed):
-    """A reflecting-slab (0 <= x <= L) + free y, z walk, packed the way dmipy-sim packs one."""
+    """A reflecting-slab (0 <= x <= L) + free y, z walk, packed the way dmipy-sim packs one: the walk's own
+    spec is dmipy-sim's :class:`~dmipy_sim.geometry.base.Box1D` of the same thickness (the pack embeds the spec
+    it was walked from; a pool-less dict declares nothing, dmipy-sim#593)."""
+    from dmipy_sim.geometry import Box1D
+    from dmipy_sim.spec import spec_of
     from dmipy_sim.replay.bank import build_replay_pack
     rng = np.random.default_rng(seed)
     step = np.sqrt(2 * D0 * DT); x = rng.uniform(0, L, N_W)
@@ -26,9 +30,12 @@ def _slab_pack(L, seed):
         x = np.where(lo, -x, np.where(hi, 2 * L - x, x))
         traj[:, t, 0] = x; dlog[:, t] = (lo | hi) * step
     traj[:, :, 1:] = np.cumsum(rng.normal(0, step, (N_W, N_T, 2)), axis=1)
+    spec = spec_of(Box1D(L), id=f"test/slab-box1d-{seed}").to_dict()
     m = dict(traj=traj, dt_traj=DT, T_max=(N_T - 1) * DT, comp=np.zeros((N_W, N_T), np.int8),
-             comp0=np.zeros(N_W, np.int64), w=np.ones(N_W), dlog_b=dlog, D_intra=D0, n_walkers=N_W, seed=seed)
-    return build_replay_pack(m, id=f"test/slab-{seed}", method="bridge_dst", K=K, license="CC-BY-4.0", citation="test")
+             comp0=np.zeros(N_W, np.int64), w=np.ones(N_W), dlog_b=dlog, D_intra=D0, n_walkers=N_W, seed=seed,
+             substrate=spec)
+    return build_replay_pack(m, id=f"test/slab-{seed}", method="bridge_dst", K=K, license="CC-BY-4.0", citation="test",
+                             segment_T=(N_T - 1) * DT)
 
 
 @pytest.fixture(scope="module")
@@ -48,7 +55,7 @@ def test_lut_matches_replay(family):
     npt.assert_allclose(seq.b(), [b_grid[5]], rtol=1e-6)
     direct = replay_signal(packs[0], compile_scheme(np.asarray(seq.G_eff, np.float64), dt, packs[0].K, GAMMA))[0]
     npt.assert_allclose(E[0, 5], direct, atol=1e-9)
-    assert packs[0].replay(seq, tissue=False)[0] == pytest.approx(direct, abs=1e-6)   # the pack reads the object too
+    assert packs[0].replay(seq, tissue=None)[0] == pytest.approx(direct, abs=1e-6)   # the pack reads the object too
 
 
 def test_best_discriminating_b(family):
