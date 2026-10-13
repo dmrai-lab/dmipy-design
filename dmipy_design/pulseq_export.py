@@ -19,8 +19,8 @@ from __future__ import annotations
 import numpy as np
 
 from dmipy_sim.acquisition.scanners import ScannerLimits
-from dmipy_sim.constants import GAMMA
-from dmipy_sim.sequences.pulseq import GAMMA_HZ, _require_pypulseq, make_system, to_pulseq
+from dmipy_sim.constants import GAMMA, GAMMA_BAR
+from dmipy_sim.sequences.pulseq import _require_pypulseq, make_system, to_pulseq
 
 def design_to_pulseq(design, *, scanner='siemens_prisma', filename=None, system=None):
     """Write a design as a scanner-runnable Pulseq spin echo (a pypulseq ``Sequence``, written to ``filename``
@@ -34,7 +34,7 @@ def design_to_pulseq(design, *, scanner='siemens_prisma', filename=None, system=
     return to_pulseq(design.to_sequence(), system=system or make_system(scanner), filename=filename)
 
 
-def seq_btensor(seq, *, gamma_hz=GAMMA_HZ, n=8000):
+def seq_btensor(seq, *, gamma_hz=GAMMA_BAR, n=8000):
     """b-tensor (s/m^2, 3x3) recomputed from an assembled Pulseq ``Sequence`` by integrating its realized
     gradient waveforms with the 180 sign flip folded in."""
     wave, _, t_refocus, *_ = seq.waveforms_and_times()
@@ -80,7 +80,7 @@ def pulseq_delivery_report(design, seq, *, scanner='siemens_prisma'):
     _require_pypulseq()
     ok, err = seq.check_timing()
     wave, *_ = seq.waveforms_and_times()
-    gamma_hz = GAMMA_HZ
+    gamma_hz = GAMMA_BAR
     # realized peak amplitude and slew on the fine raster (T/m, T/m/s)
     gmax = 0.0
     smax = 0.0
