@@ -102,3 +102,7 @@ pytest -q tests/test_pulseq_export.py   # the Pulseq round-trip
 ## License
 
 See [LICENSE](LICENSE).
+
+## License
+
+Dual-licensed: **GNU AGPL-3.0** for open-source use, or a **commercial license** for proprietary use; see [LICENSING.md](LICENSING.md) (commercial: rutger.fick@dmrai-lab.org).
