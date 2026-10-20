@@ -368,8 +368,11 @@ def _solve(C, K, P, envelope, dt, steps, restarts, rng, warm_start=None, echo=No
             Gs = np.asarray(G_scored)
             best = np.where(imp, an, best)
             bestG[imp] = Gs[imp]
+    # the winner is retracted once more through the designer's own float64 projection (the float32 ascent's
+    # POCS floors a few 1e-6 above the box) and scored there, so the sup IS the returned waveform's error
     j = int(np.argmax(best))
-    return float(best[j]), prob.flatten(bestG[j]), prob
+    x = prob.project(prob.flatten(bestG[j]))
+    return -_objective(prob, C, K, P)(x)[0], x, prob
 
 
 def _free_bound(G, dt, T, K_stored, K, D):
