@@ -81,9 +81,9 @@ class WaveformProblem:
         The set is exposed two ways on purpose. `constraints`/`bounds` hand it to SQP, which
         holds it EXACTLY and is what the NOW designer wants for its ~420-variable problems.
         This hands the same set to a projected first-order method, which is what certification
-        needs: a certificate is taken over the whole walk, so n_t is 601-1001 rather than 140,
-        SQP's QP subproblem is O(n^3) in the 1800-3000 variables that implies, and it stops
-        being usable well before that. Same set, two interfaces -- which is the point, since a
+        needs: a certificate is taken over the whole window on the scanner's raster, so n_t is
+        thousands rather than 140, SQP's QP subproblem is O(n^3) in the variables that implies,
+        and it stops being usable well before that. Same set, two interfaces -- which is the point, since a
         certificate over a different set than the designer can reach would be unsound.
 
         Moment nulling is affine, the slew limit a band and the amplitude limit a box, so all

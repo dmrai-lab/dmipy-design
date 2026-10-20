@@ -12,37 +12,40 @@ linearly interpolated between them. NumPy/SciPy only (no autodiff, no JAX), matc
 """
 import numpy as np
 
+from .replay_design import DESIGN_RASTER
+
 __all__ = ["pgse_response_lut", "lut_pgse", "best_discriminating_pgse", "discriminability_matrix"]
 
 
-def lut_pgse(pack, b_grid, *, delta, Delta, direction=(1.0, 0.0, 0.0)):
-    """The PGSE family a LUT is built over, on ``pack``'s save grid: dmipy-sim's square PGSE, one measurement
-    per b in ``b_grid``, the pair centred in the pack's window."""
+def lut_pgse(pack, b_grid, *, delta, Delta, direction=(1.0, 0.0, 0.0), dt=DESIGN_RASTER):
+    """The PGSE family a LUT is built over: dmipy-sim's square PGSE, one measurement per b in ``b_grid``, the
+    pair centred in the pack's window ``T`` (``pack.T_window``, the sequence's TE), sampled on the raster ``dt``."""
     from dmipy_sim.sequences import pgse
-    n_t, dt = int(pack.n_t), float(pack.dt)
+    T = float(pack.T_window)
     b_grid = np.asarray(b_grid, float)
     return pgse(np.tile(np.asarray(direction, float), (len(b_grid), 1)), delta, Delta, bvalues=b_grid,
-                TE=(n_t - 1) * dt, n_t=n_t, slew_rate=np.inf)
+                TE=T, n_t=int(round(T / float(dt))) + 1, slew_rate=np.inf)
 
 
-def pgse_response_lut(packs, b_grid, *, delta=None, Delta=None, direction=(1.0, 0.0, 0.0)):
+def pgse_response_lut(packs, b_grid, *, delta=None, Delta=None, direction=(1.0, 0.0, 0.0), dt=DESIGN_RASTER):
     """Precompute the PGSE signal of each pack over ``b_grid`` at fixed ``(delta, Delta)`` along
     ``direction``. Returns ``E`` of shape ``(n_packs, n_b)`` (exact replay at each node). ``delta``/``Delta``
-    default to a symmetric split of the packs' save window."""
+    default to a symmetric split of the packs' window (``delta = T / 5``, ``Delta = 3 T / 5``)."""
     from dmipy_sim.replay import compile_scheme, replay_signal
     from dmipy_sim.constants import GAMMA
     packs = list(packs)
-    dt, n_t = packs[0].dt, packs[0].n_t
-    if any(abs(p.dt - dt) > 1e-12 or p.n_t != n_t for p in packs):
-        raise ValueError("all packs must share the save grid (dt, n_t)")
-    delta = delta if delta is not None else 0.25 * (n_t - 1) * dt
-    Delta = Delta if Delta is not None else min((n_t - 2) * dt, delta + 0.5 * (n_t - 1) * dt)
+    T = float(packs[0].T_window)
+    if any(abs(float(p.T_window) - T) > 1e-12 * T for p in packs):
+        raise ValueError("all packs must share the window T (pack.T_window)")
+    delta = delta if delta is not None else 0.2 * T
+    Delta = Delta if Delta is not None else 0.6 * T
     b_grid = np.asarray(b_grid, float)
     # one sequence, one measurement per b (shared across packs); compile per pack K
-    G = np.asarray(lut_pgse(packs[0], b_grid, delta=delta, Delta=Delta, direction=direction).G_eff, np.float64)
+    seq = lut_pgse(packs[0], b_grid, delta=delta, Delta=Delta, direction=direction, dt=dt)
+    G = np.asarray(seq.G_eff, np.float64)
     E = np.zeros((len(packs), len(b_grid)))
     for i, p in enumerate(packs):
-        E[i] = replay_signal(p, compile_scheme(G, dt, p.K, GAMMA, n_t=p.n_t))
+        E[i] = replay_signal(p, compile_scheme(G, float(seq.dt), p.K, GAMMA, T=T))
     return E
 
 
