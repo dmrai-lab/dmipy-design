@@ -1,6 +1,6 @@
 """Parametric-family response LUT (T3): the precomputed table matches the exact replay forward, the
 best-discriminating-b lookup agrees with a direct sweep, and the discriminability map orders by size
-separation. Synthetic slab packs (no simulator). Skipped if dmipy_sim absent."""
+separation. Slab packs from dmipy-sim's producer (the ``slab_packs`` fixture). Skipped if dmipy_sim absent."""
 import numpy as np
 import numpy.testing as npt
 import pytest
@@ -11,49 +11,27 @@ from dmipy_sim.constants import GAMMA
 from dmipy_design.replay_lut import (pgse_response_lut, lut_pgse, best_discriminating_pgse,
                                      discriminability_matrix)
 
-N_W, N_T, K, DT, D0 = 500, 120, 40, 1e-3, 2e-9
+from conftest import SLAB_T as T
 
-
-def _slab_pack(L, seed):
-    """A reflecting-slab (0 <= x <= L) + free y, z walk, packed the way dmipy-sim packs one: the walk's own
-    spec is dmipy-sim's :class:`~dmipy_sim.geometry.base.Box1D` of the same thickness (the pack embeds the spec
-    it was walked from; a pool-less dict declares nothing, dmipy-sim#593)."""
-    from dmipy_sim.geometry import Box1D
-    from dmipy_sim.spec import spec_of
-    from dmipy_sim.replay.bank import build_replay_pack
-    rng = np.random.default_rng(seed)
-    step = np.sqrt(2 * D0 * DT); x = rng.uniform(0, L, N_W)
-    traj = np.zeros((N_W, N_T, 3)); dlog = np.zeros((N_W, N_T))
-    for t in range(N_T):
-        x = x + rng.normal(0, step, N_W)
-        lo, hi = x < 0, x > L
-        x = np.where(lo, -x, np.where(hi, 2 * L - x, x))
-        traj[:, t, 0] = x; dlog[:, t] = (lo | hi) * step
-    traj[:, :, 1:] = np.cumsum(rng.normal(0, step, (N_W, N_T, 2)), axis=1)
-    spec = spec_of(Box1D(L), id=f"test/slab-box1d-{seed}").to_dict()
-    m = dict(traj=traj, dt_traj=DT, T_max=(N_T - 1) * DT, comp=np.zeros((N_W, N_T), np.int8),
-             comp0=np.zeros(N_W, np.int64), w=np.ones(N_W), dlog_b=dlog, D_intra=D0, n_walkers=N_W, seed=seed,
-             substrate=spec)
-    return build_replay_pack(m, id=f"test/slab-{seed}", method="bridge_dst", K=K, license="CC-BY-4.0", citation="test",
-                             segment_T=(N_T - 1) * DT)
+DT = 1e-4          # the LUT's raster in these tests
 
 
 @pytest.fixture(scope="module")
-def family():
+def family(slab_packs):
     Ls = [3e-6, 5e-6, 8e-6]
-    return [_slab_pack(L, s) for s, L in enumerate(Ls)], Ls
+    return [slab_packs[L] for L in Ls], Ls
 
 
 def test_lut_matches_replay(family):
     packs, _ = family
     b_grid = np.linspace(0, 4e9, 9)
-    E = pgse_response_lut(packs, b_grid, delta=0.25 * (N_T - 1) * DT,
-                          Delta=0.7 * (N_T - 1) * DT, direction=(1., 0, 0))
-    # spot-check a node against a direct replay of the same PGSE (dmipy-sim's builder on the pack grid)
-    dt = packs[0].dt; delta = 0.25 * (N_T - 1) * DT; Delta = 0.7 * (N_T - 1) * DT
-    seq = lut_pgse(packs[0], [b_grid[5]], delta=delta, Delta=Delta, direction=(1., 0, 0))
+    delta, Delta = 0.25 * T, 0.7 * T
+    E = pgse_response_lut(packs, b_grid, delta=delta, Delta=Delta, direction=(1., 0, 0), dt=DT)
+    # spot-check a node against a direct replay of the same PGSE (dmipy-sim's builder over the pack's window)
+    seq = lut_pgse(packs[0], [b_grid[5]], delta=delta, Delta=Delta, direction=(1., 0, 0), dt=DT)
     npt.assert_allclose(seq.b(), [b_grid[5]], rtol=1e-6)
-    direct = replay_signal(packs[0], compile_scheme(np.asarray(seq.G_eff, np.float64), dt, packs[0].K, GAMMA))[0]
+    assert seq.dt == pytest.approx(DT)
+    direct = replay_signal(packs[0], compile_scheme(np.asarray(seq.G_eff, np.float64), seq.dt, packs[0].K, GAMMA, T=T))[0]
     npt.assert_allclose(E[0, 5], direct, atol=1e-9)
     assert packs[0].replay(seq, tissue=None)[0] == pytest.approx(direct, abs=1e-6)   # the pack reads the object too
 
@@ -61,7 +39,7 @@ def test_lut_matches_replay(family):
 def test_best_discriminating_b(family):
     packs, _ = family
     b_grid = np.linspace(0, 4e9, 25)
-    E = pgse_response_lut(packs, b_grid, direction=(1., 0, 0))
+    E = pgse_response_lut(packs, b_grid, direction=(1., 0, 0), dt=DT)
     b_star, contrast = best_discriminating_pgse(E, b_grid, 0, 2)     # 3um vs 8um
     assert contrast == pytest.approx(np.abs(E[0] - E[2]).max())
     assert contrast > 0.04 and b_star > 0                            # a real, non-trivial best b
@@ -69,7 +47,7 @@ def test_best_discriminating_b(family):
 
 def test_discriminability_orders_by_size(family):
     packs, Ls = family                                               # L = 3, 5, 8 um
-    E = pgse_response_lut(packs, np.linspace(0, 4e9, 25), direction=(1., 0, 0))
+    E = pgse_response_lut(packs, np.linspace(0, 4e9, 25), direction=(1., 0, 0), dt=DT)
     M = discriminability_matrix(E, None)
     npt.assert_allclose(np.diag(M), 0.0)
     npt.assert_allclose(M, M.T)

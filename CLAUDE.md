@@ -22,8 +22,13 @@ that export to a scanner via Pulseq.
 - **Substrate-informed waveform design** — `replay_design.py::design_discriminating_waveform`:
   optimise a gradient waveform *through* a stored Monte-Carlo substrate by replaying a `.rpk`
   pack (`dmipy_sim.replay`), e.g. `max_g |E_cyl - E_sph|`. Closed-form gradient through the
-  DCT + complex mean → SciPy L-BFGS-B (no autodiff), smooth cosine basis + PGSE warm start.
-  The substrate-informed counterpart to NOW's substrate-blind b-maximiser.
+  pack's band projection + complex mean → SciPy L-BFGS-B (no autodiff); the waveform is synthesised
+  in the pack's own band basis (the window's sines, `n_basis <= K`) + PGSE warm start, on the
+  scanner's gradient raster. The substrate-informed counterpart to NOW's substrate-blind b-maximiser.
+- **Replay certificate** — `certify.py`: the sup of the replay error over the deliverable set
+  (`ReplayEnvelope`, the same `WaveformProblem` NOW optimises over) within a pack's stored band,
+  the pack's walk-free truncation term quoted beyond it; `k_for_walk` is dmipy-sim's one derivation
+  of a window's band count (the scanner class's band, dmipy-sim#643).
 
 **NOT here (still out of scope):**
 - CRLB / Fisher-information optimal experiment design.
@@ -106,7 +111,10 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 | `optimizers/stimulated_echo.py` | `design_stimulated_echo` — PGSTE via the NOW core in dmipy-sim's stimulated-echo layout |
 | `optimizers/rf_pulse.py` | `design_refocusing_rf`, `RfPulseDesign` — B1-robust refocusing RF (adiabatic HS + GRAPE); `warm_start=` accepts a dmipy-sim `B1Pulse`; `to_rf_event(t_s)` puts the designed pulse in a schedule |
 | `pulseq_export.py` | `.seq` export + delivery/PNS reports (needs `[pulseq]`) |
-| `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B); the result's `to_sequence()` is a self-refocusing gradient echo |
+| `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B in the packs' band basis); the result's `to_sequence()` is a self-refocusing gradient echo |
+| `replay_lut.py` | `pgse_response_lut` — a pack family lowered to its PGSE response over a b-grid; `best_discriminating_pgse`, `discriminability_matrix` |
+| `replay_codesign.py` | `codesign_waveform_and_b1` — the discriminating gradient and the robust refocusing pulse as one pipeline |
+| `certify.py` | `certify`, `certify_pools`, `sup_replay_error`, `BandWalk`, `k_for_walk` — Eq. (4) on a pack's stored bands over a `ReplayEnvelope` |
 | `constraints.py` | `TimeConstraints` (scan time); a scanner's limits are dmipy-sim's `ScannerLimits` |
 
 ## Tests
