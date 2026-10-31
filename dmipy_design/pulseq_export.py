@@ -1,9 +1,9 @@
 """Tier-2 deliverability: export a designed sequence to a scanner-runnable Pulseq spin echo and check it
 against the vendor's limits + a b-tensor round-trip -- no scanner required.
 
-A design's ``to_sequence()`` is a dmipy-sim :class:`~dmipy_sim.acquisition.scanner_sequence.ScannerSequence`
+A design's ``to_sequence()`` is a dmipy-replay :class:`~dmipy_replay.acquisition.scanner_sequence.ScannerSequence`
 built to its timing budget -- the physical gradient with the pulses in their own windows -- so the export IS
-dmipy-sim's :func:`~dmipy_sim.sequences.pulseq.to_pulseq` on that object, on the scanner from dmipy-sim's cited
+dmipy-sim's :func:`~dmipy_sim.sequences.pulseq.to_pulseq` on that object, on the scanner from dmipy-replay's cited
 catalogue: nothing is resampled or re-derived here. ``pulseq_delivery_report`` then runs the checks a scanner
 would at acceptance time that we CAN do offline:
 
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from dmipy_sim.acquisition.scanners import ScannerLimits
-from dmipy_sim.constants import GAMMA, GAMMA_BAR
+from dmipy_replay.acquisition.scanners import ScannerLimits
+from dmipy_replay.constants import GAMMA, GAMMA_BAR
 from dmipy_sim.sequences.pulseq import _require_pypulseq, make_system, to_pulseq
 
 def design_to_pulseq(design, *, scanner='siemens_prisma', filename=None, system=None):

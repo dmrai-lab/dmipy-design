@@ -9,9 +9,16 @@ env:
   OPENBLAS_NUM_THREADS: "1"
   MKL_NUM_THREADS: "1"
   JAX_PLATFORMS: cpu   # dmipy-sim/fit pull JAX; CI is CPU-only
+  # The 3.0 line is not on PyPI yet (dmipy-sim 3.0, dmipy-replay 0.2, dmipy-fit 3.0): CI installs each from the commit
+  # this revision was tested against. dmipy-replay is held before its scanner-class refusal (dmipy-sim#706): the
+  # engine's `simulate` builds a pack that states no class, which the refusal turns away. Move each ref forward
+  # when the releases land and `pip install` resolves them from PyPI instead.
+  DMIPY_SIM_REF: 4e30fc9eb1f355917b3fb45ad4d978ac2f01d98b
+  DMIPY_REPLAY_REF: 25a78f9f17578214aa289fe24a2be4f99c1b46be
+  DMIPY_FIT_REF: 33dd40a8981302b99f5c474b9f1fd92ab048a008
 jobs:
   core:
-    # NOW / timing / PGSTE — NumPy + SciPy only, fast feedback
+    # NOW / timing / PGSTE / the replay certificate — NumPy + SciPy + the two dmipy packages, fast feedback
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -21,9 +28,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@main"   # the acquisition object; PyPI once 3.0 ships
-      - run: pip install -e ".[dev]"
-      - run: pytest -q -m "not slow"
+      - run: |
+          pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@${DMIPY_SIM_REF}" \
+                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}"
+          pip install --no-deps -e .     # its dmipy-sim / dmipy-replay bounds name the releases above
+          pip install pytest pytest-cov
+      - run: pytest -q --ignore=tests/test_pulseq_export.py --ignore=tests/test_interop.py
 
   pulseq:
     # scanner-runnable .seq export round-trip — pulls dmipy-sim + pypulseq
@@ -33,20 +43,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@main"
-      - run: pip install -e ".[pulseq,dev]"
+      - run: |
+          pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@${DMIPY_SIM_REF}" \
+                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}"
+          pip install --no-deps -e .
+          pip install pytest "pypulseq>=1.4"
       - run: pytest -q tests/test_pulseq_export.py
 
   interop:
     # cross-package: a designed waveform -> dmipy-sim simulates -> dmipy-fit recovers it.
-    # Pulls dmipy-sim and dmipy-fit from their git mains until the 3.0 line ships on PyPI — also
-    # guards against interface drift as they release independently.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@main" "dmipy-fit @ git+https://github.com/dmrai-lab/dmipy-fit@main"
-      - run: pip install -e ".[interop,dev]" "jax[cpu]"
+      - run: |
+          pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@${DMIPY_SIM_REF}" \
+                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}"
+          pip install --no-deps "dmipy-fit @ git+https://github.com/dmrai-lab/dmipy-fit@${DMIPY_FIT_REF}"
+          pip install --no-deps -e .
+          pip install pytest dipy "jax[cpu]"
       - run: pytest -q tests/test_interop.py

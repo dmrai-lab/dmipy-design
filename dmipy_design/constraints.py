@@ -1,27 +1,10 @@
-"""Scan-time constraints. A scanner's gradient and RF limits are data with a citation and live in dmipy-sim's
-catalogue (:class:`dmipy_sim.acquisition.scanners.ScannerLimits`); every designer here takes one as ``limits``.
+"""The deliverable-waveform set. A scanner's gradient and RF limits are data with a citation and live in dmipy-replay's
+catalogue (:class:`dmipy_replay.acquisition.scanners.ScannerLimits`); every designer here takes one as ``limits``.
 """
 
 from dataclasses import dataclass
 
-
-@dataclass
-class TimeConstraints:
-    """Scan time constraints.
-
-    Parameters
-    ----------
-    total_scan_time_s : float
-        Maximum total scan time in seconds.
-    tr : float
-        Repetition time in seconds.  Total measurements = total_scan_time / TR.
-    """
-    total_scan_time_s: float = 600.0  # 10 minutes
-    tr: float = 5.0                   # seconds
-
-    @property
-    def max_measurements(self) -> int:
-        return int(self.total_scan_time_s / self.tr)
+import numpy as np
 
 
 # --------------------------------------------------------------- deliverable waveform set
@@ -43,8 +26,8 @@ class WaveformProblem:
     n_t: int
     n_axes: int
     dt: float
-    free: "np.ndarray"          # indices of samples the optimiser may move
-    sign: "np.ndarray"          # (n_t, 1) spin-echo sign: +1 before the 180, -1 after
+    free: np.ndarray          # indices of samples the optimiser may move
+    sign: np.ndarray          # (n_t, 1) spin-echo sign: +1 before the 180, -1 after
     G_max: float
     slew_rate_max: float
     constraints: list
@@ -62,7 +45,6 @@ class WaveformProblem:
 
     def gradient(self, x):
         """Waveform ``(n_t, n_axes)`` from the flat variable vector (zero outside the window)."""
-        import numpy as np
         g = np.zeros((self.n_t, self.n_axes))
         g[self.free, :] = np.asarray(x).reshape(self.n_axes, self.n_free).T
         return g
@@ -129,7 +111,7 @@ def waveform_problem(*, n_t, n_axes, dt, echo, encoding_mask=None, G_max=0.08,
     """
     import numpy as np
     import scipy.sparse as sp
-    from dmipy_sim.constants import GAMMA
+    from dmipy_replay.constants import GAMMA
 
     enc = (np.ones(n_t, bool) if encoding_mask is None else np.asarray(encoding_mask, bool))
     nr = max(1, int(np.ceil(G_max / (slew_rate_max * dt))))

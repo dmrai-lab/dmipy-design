@@ -7,24 +7,40 @@ name = "dmipy-design"
 version = "2.0.1"
 description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE) over dmipy-sim's acquisition object and scanner limits, Pulseq I/O — instant-pulse public scope"
 readme = "README.md"
+license = { text = "AGPL-3.0-only OR LicenseRef-Commercial" }  # dual-licensed; see LICENSING.md
+authors = [
+    { name = "Rutger Fick", email = "fick.rutger@gmail.com" }
+]
+keywords = ["diffusion MRI", "gradient waveform design", "b-tensor encoding", "Pulseq", "optimization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     # the acquisition object a design produces, the timing budget it is built to and the cited scanner
-    # limits it is built under all live in dmipy-sim (dmipy-sim#173); this package is the optimisation over them
-    "dmipy-sim>=2.2",
+    # limits it is built under live in dmipy-replay; this package is the optimisation over them
+    "dmipy-replay>=0.2,<0.3",
+    # the replay certificate reads dmipy-sim's coefficient walks, and the Pulseq export is its writer
+    "dmipy-sim>=3,<4",
 ]
 
 [project.optional-dependencies]
 # scanner-runnable .seq export + offline delivery/PNS checks
 pulseq = ["pypulseq>=1.4"]
 # cross-package interoperability tests: a designed waveform -> dmipy-sim -> dmipy-fit
-interop = ["dmipy-fit>=2.1"]
+interop = ["dmipy-fit>=3,<4"]
 dev = ["pytest>=7", "pytest-cov"]
 
 [project.urls]
 Homepage = "https://github.com/dmrai-lab/dmipy-design"
+Repository = "https://github.com/dmrai-lab/dmipy-design"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -32,6 +48,3 @@ include = ["dmipy_design*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "slow: marks tests as slow-running (deselect with '-m \"not slow\"')",
-]

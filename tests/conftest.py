@@ -25,6 +25,8 @@ for _v in (
 import pytest
 
 SLAB_N_WALKERS, SLAB_K, SLAB_T, SLAB_D0 = 600, 40, 0.1, 2e-9
+#: the scanner class the slab packs state: a pack replays only the waveforms its class can deliver
+SLAB_SCANNER_CLASS = "connectome_2"
 
 
 def _slab_pack(L, seed):
@@ -33,13 +35,14 @@ def _slab_pack(L, seed):
     import dmipy_sim as ds
     from dmipy_sim.geometry import Box1D
     from dmipy_sim.replay.bank import build_replay_pack
-    walk = ds.simulate_trajectories(n_walkers=SLAB_N_WALKERS, diffusivity=SLAB_D0, geometry=Box1D(L), T_max=SLAB_T,
-                                    seed=seed, K=SLAB_K, require_gpu=False)
-    return build_replay_pack(walk, id=f"test/slab-{seed}", license="CC-BY-4.0", citation="test", K=SLAB_K)
+    from dmipy_sim.replay.compression import default_envelope
+    walk = ds.walk(ds.spec.spec_of(Box1D(L)), SLAB_N_WALKERS, SLAB_T, diffusivity=SLAB_D0, seed=seed, K=SLAB_K,
+                   require_gpu=False)
+    return build_replay_pack(walk, id=f"test/slab-{seed}", license="CC-BY-4.0", citation="test", K=SLAB_K,
+                             envelope=dict(default_envelope(), scanner=SLAB_SCANNER_CLASS))
 
 
 @pytest.fixture(scope="session")
 def slab_packs():
     """``{thickness: pack}`` for slabs of 3, 4, 5 and 8 um (seeds 0..3)."""
-    pytest.importorskip("dmipy_sim")
     return {L: _slab_pack(L, s) for s, L in enumerate((3e-6, 4e-6, 5e-6, 8e-6))}

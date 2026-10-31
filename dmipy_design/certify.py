@@ -24,7 +24,7 @@ two parts, and they are stated separately.
 
 *Beyond the stored band* the error is walk-free: the bands beyond ``K`` of a free walk at the
 pack's diffusivity carry the phase variance ``gamma^2 sum_{k > K} W_k^2 var_k`` with
-``var_k = 2 D T^2 / (pi k)^2`` (:func:`dmipy_sim.replay.compression.band_variances`; a wall only
+``var_k = 2 D T^2 / (pi k)^2`` (:func:`dmipy_replay.replay.compression.band_variances`; a wall only
 lowers a band's variance), and a dropped independent phase costs the signal half of it. The pack
 states this over its envelope's battery as ``fidelity.terms.truncation`` (RPK.md 9.5.5), and a
 certificate quotes it: a pack cannot be certified tighter than its own band.
@@ -49,7 +49,7 @@ import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.constants import GAMMA
 from .constraints import waveform_problem
 
 __all__ = ["ReplayEnvelope", "replay_envelope", "BandWalk", "SupResult", "Certificate",
@@ -105,11 +105,11 @@ def replay_envelope(model=None, *, G_max=None, slew_rate_max=None, raster=10e-6,
     ``replay_envelope(G_max=1.0, slew_rate_max=1e4, name='insert-1T/m')``.
     """
     if model is not None:
-        from dmipy_sim.acquisition.scanners import ScannerLimits
+        from dmipy_replay.acquisition.scanners import ScannerLimits
         lim = ScannerLimits.of(model, regime=regime)
         return ReplayEnvelope(name or model, lim.G_max, lim.slew_max,
                               raster if lim.grad_raster is None else lim.grad_raster, null_M1, null_M2, n_axes,
-                              dict(source="dmipy_sim.acquisition.scanners", model=lim.name, slew_regime=regime))
+                              dict(source="dmipy_replay.acquisition.scanners", model=lim.name, slew_regime=regime))
     if G_max is None or slew_rate_max is None:
         raise ValueError("give a catalogue `model`, or both `G_max` and `slew_rate_max`")
     return ReplayEnvelope(name or f"custom-{G_max*1e3:.0f}mT/m", float(G_max),
@@ -146,11 +146,11 @@ class BandWalk:
 
     @classmethod
     def of(cls, walk):
-        """``walk`` as a :class:`BandWalk`: a :class:`~dmipy_sim.replay.ReplayPack`, a
+        """``walk`` as a :class:`BandWalk`: a :class:`~dmipy_replay.replay.ReplayPack`, a
         :class:`~dmipy_sim.coefficient_walk.CoefficientWalk`, or one already."""
         if isinstance(walk, cls):
             return walk
-        from dmipy_sim.replay import ReplayPack
+        from dmipy_replay.replay.replay import ReplayPack
         if isinstance(walk, ReplayPack):
             labels = walk.arrays.get("comp_static")
             terms = (walk.fidelity or {}).get("terms") or {}
@@ -190,7 +190,7 @@ class SupResult:
 
     ``bound`` is the walk-free statement of the same error at the winning waveform, what a pack's own
     certificate states for a band (RPK.md 9.5.5): half the phase variance the bands ``K' < k <= K`` carry for a
-    free walk at the pack's diffusivity (:func:`dmipy_sim.replay.compression.band_variances`), the bias of the
+    free walk at the pack's diffusivity (:func:`dmipy_replay.replay.compression.band_variances`), the bias of the
     ensemble-mean magnitude, which a restricted walk's bands stay below. The measured ``sup`` on a finite
     ensemble also carries the realisation's noise the adversary fits, so below the Monte-Carlo floor it sits
     above ``bound`` and converges onto it with the walker count. None when the walk records no diffusivity.
@@ -215,8 +215,8 @@ class SupResult:
 
 def _projection(n_t, dt, T, K):
     """``(K + 2, n_t)``: a unit sample held over its interval, on the window's bands, times ``gamma`` -- the matrix
-    a pack's replay contracts a waveform with (:func:`dmipy_sim.replay.compression.band_projection_matrix`)."""
-    from dmipy_sim.replay.compression import band_projection_matrix
+    a pack's replay contracts a waveform with (:func:`dmipy_replay.replay.compression.band_projection_matrix`)."""
+    from dmipy_replay.replay.compression import band_projection_matrix
     return GAMMA * band_projection_matrix(int(n_t), float(dt), float(T), int(K))
 
 
@@ -377,9 +377,9 @@ def _solve(C, K, P, envelope, dt, steps, restarts, rng, warm_start=None, echo=No
 
 def _free_bound(G, dt, T, K_stored, K, D):
     """Half the phase variance the bands ``K < k <= K_stored`` carry for the effective waveform ``G`` ``(n_t,
-    n_axes)`` on a free walk at ``D`` (:func:`dmipy_sim.replay.compression.band_variances`): the walk-free
+    n_axes)`` on a free walk at ``D`` (:func:`dmipy_replay.replay.compression.band_variances`): the walk-free
     statement of ``|S_stored - S_K|`` at this waveform."""
-    from dmipy_sim.replay.compression import band_projection, band_variances
+    from dmipy_replay.replay.compression import band_projection, band_variances
     W = band_projection(np.asarray(G, np.float64)[None], dt, T, int(K_stored))[0, 2 + int(K):, :]
     return float(0.5 * GAMMA ** 2 * ((W ** 2).sum(axis=1) * band_variances(int(K_stored), T, D)[int(K):]).sum())
 
@@ -398,7 +398,7 @@ def sup_replay_error(walk, K, envelope, *, dt=None, steps=300, restarts=64, seed
                      warm_start=None, holdout=False, echo=None):
     """The sup of Eq. (4) within the stored band: worst-case ``|S_stored(G) - S_K(G)|`` over ``G_scanner``.
 
-    ``walk`` is a :class:`~dmipy_sim.replay.ReplayPack`, a :class:`~dmipy_sim.coefficient_walk.CoefficientWalk`
+    ``walk`` is a :class:`~dmipy_replay.replay.ReplayPack`, a :class:`~dmipy_sim.coefficient_walk.CoefficientWalk`
     or a :class:`BandWalk`; ``K`` is a band below the stored one (the stored band against itself is zero by
     construction, and what lies beyond it is the pack's walk-free term, :class:`Certificate`). The adversary's
     waveforms are sampled on the envelope's raster (``dt`` overrides it).
@@ -482,11 +482,11 @@ def k_min(walk, envelope, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 
 # ------------------------------------------------------------- certified bandwidth
 def k_for_walk(T, *, scanner=None, bandwidth_hz=None):
     """Bands a window of duration ``T`` (s) needs to carry a band: ``K = ceil(2 T f)``, the one derivation every
-    producer reads (:func:`dmipy_sim.replay.bank.mode_count`), with ``f`` the storage band of the scanner class
+    producer reads (:func:`dmipy_replay.replay.storage.mode_count`), with ``f`` the storage band of the scanner class
     ``scanner`` (its certified band times the storage margin, dmipy-sim#643; a class the catalogue holds no
     certified band for is refused by name) or a stated ``bandwidth_hz``. Mode ``k`` of the bridge is the sine at
     ``f_k = k / (2T)``, so the band count is just a bandwidth expressed on this particular window."""
-    from dmipy_sim.replay.bank import mode_count
+    from dmipy_replay.replay.storage import mode_count
     if scanner is None and bandwidth_hz is None:
         raise ValueError("give the scanner class whose band the walk carries, or a bandwidth_hz")
     return int(mode_count(float(T), scanner, temporal_bandwidth_hz=bandwidth_hz))

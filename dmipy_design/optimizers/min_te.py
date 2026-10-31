@@ -26,7 +26,7 @@ def min_te_for_b(b_target, b_delta=1.0, *, limits, timing=DEFAULT_TIMING, te_lo=
     b_delta : float
         Target b-tensor shape (1 LTE, 0 STE, -0.5 PTE), passed to ``design_waveform_now``.
     limits : ScannerLimits (or what ``ScannerLimits.of`` resolves)
-        The scanner's limits, from dmipy-sim's catalogue.
+        The scanner's limits, from dmipy-replay's catalogue.
     timing : SequenceTiming
         The timing budget (:data:`~dmipy_design.optimizers.timing.DEFAULT_TIMING` when not given); its
         ``min_TE()`` is the hard lower floor for the bracket.

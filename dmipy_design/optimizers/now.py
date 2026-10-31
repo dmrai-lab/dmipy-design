@@ -23,10 +23,10 @@ shape plus one extra equality pinning the encoding's RMS frequency, f_rms = targ
 solver, all shapes -- the LTE problem is just the rank-1 case, OGSE the rank-1 + spectral case.
 
 What the solver optimises INSIDE -- the scanner's limits, the timing budget, the encoding windows -- is
-dmipy-sim's: :class:`~dmipy_sim.acquisition.scanners.ScannerLimits` (the cited catalogue, with the SAFE
-coefficients the PNS constraint reads) and :class:`~dmipy_sim.acquisition.timing.SequenceTiming` read on the
-grid by :mod:`.timing`. What it produces is dmipy-sim's acquisition object: ``NowDesign.to_sequence()`` is
-:func:`~dmipy_sim.sequences.builders.from_btensor_waveform` (or ``from_pgste_waveform`` for a stimulated echo)
+dmipy-replay's: :class:`~dmipy_replay.acquisition.scanners.ScannerLimits` (the cited catalogue, with the SAFE
+coefficients the PNS constraint reads) and :class:`~dmipy_replay.acquisition.timing.SequenceTiming` read on the
+grid by :mod:`.timing`. What it produces is dmipy-replay's acquisition object: ``NowDesign.to_sequence()`` is
+:func:`~dmipy_replay.sequences.builders.from_btensor_waveform` (or ``from_pgste_waveform`` for a stimulated echo)
 of the designed physical gradient, carrying the budget it was built to.
 """
 from __future__ import annotations
@@ -35,8 +35,8 @@ import scipy.sparse as sp
 from scipy.optimize import minimize
 from dataclasses import dataclass
 
-from dmipy_sim.acquisition.scanners import ScannerLimits
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.acquisition.scanners import ScannerLimits
+from dmipy_replay.constants import GAMMA
 
 from .timing import DEFAULT_TIMING, encoding_mask
 
@@ -84,12 +84,11 @@ def _rank_of(b_delta):
 
 
 def _validate_b_delta(b_delta):
-    """Reject a ``b_delta`` this solver cannot realise, instead of silently returning another shape.
+    """``b_delta`` as a float if the solver realises it, else a ValueError naming the supported shapes.
 
-    The rank-3 shape constraint pins the b-tensor to isotropy without reference to the requested value, so
-    an intermediate ``b_delta`` (0.75, 0.5, 0.25, ...) previously returned a *spherical* design carrying
-    the requested number in ``NowDesign.b_delta`` and a shape residual of ~1e-30 -- correct for the
-    constraint that was actually applied, and silently not what was asked for.
+    The rank-3 shape constraint pins the b-tensor to isotropy without reference to the requested value, so an
+    intermediate ``b_delta`` (0.75, 0.5, 0.25, ...) would be a spherical design labelled with the number asked for:
+    only the shapes of :data:`SUPPORTED_SHAPES` are accepted.
     """
     try:
         bd = float(b_delta)
@@ -134,11 +133,11 @@ class NowDesign:
     recall_idx: int = None      # ... and its recall sample
 
     def to_sequence(self, b_target=None):
-        """The design as dmipy-sim's acquisition object, built to its budget: a spin echo through
-        :func:`~dmipy_sim.sequences.builders.from_btensor_waveform` (the 180 at TE/2), a stimulated echo through
-        :func:`~dmipy_sim.sequences.builders.from_pgste_waveform` (store, TM, recall). ``b_target`` (s/m²)
+        """The design as dmipy-replay's acquisition object, built to its budget: a spin echo through
+        :func:`~dmipy_replay.sequences.builders.from_btensor_waveform` (the 180 at TE/2), a stimulated echo through
+        :func:`~dmipy_replay.sequences.builders.from_pgste_waveform` (store, TM, recall). ``b_target`` (s/m²)
         rescales the amplitude (b ∝ |G|²; the b-tensor shape and refocusing are invariant under the rescale)."""
-        from dmipy_sim.sequences import from_btensor_waveform, from_pgste_waveform
+        from dmipy_replay.sequences import from_btensor_waveform, from_pgste_waveform
         G = np.asarray(self.G, np.float64)
         if b_target is not None:
             G = G * np.sqrt(float(b_target) / self.b_value)
@@ -156,10 +155,10 @@ def design_waveform_now(b_delta=1.0, *, limits, TE=0.060, n_t=140, timing=DEFAUL
                         **design_kwargs):
     """Design a max-b spin-echo gradient waveform via NOW's SQP recipe (``b_delta`` one of the three realisable
     shapes, ``SUPPORTED_SHAPES``: 1.0 LTE, 0.0 STE, -0.5 PTE -- anything else raises rather than returning another
-    shape; OGSE with ``spectral_freq``) under ``limits`` -- a :class:`~dmipy_sim.acquisition.scanners.ScannerLimits`, or anything
+    shape; OGSE with ``spectral_freq``) under ``limits`` -- a :class:`~dmipy_replay.acquisition.scanners.ScannerLimits`, or anything
     ``ScannerLimits.of`` resolves (``"siemens_prisma"``, ``"connectom"``, an explicit ``(G_max, slew)``).
 
-    ``timing`` is the :class:`~dmipy_sim.acquisition.timing.SequenceTiming` budget the encoding windows follow
+    ``timing`` is the :class:`~dmipy_replay.acquisition.timing.SequenceTiming` budget the encoding windows follow
     from (:func:`~dmipy_design.optimizers.timing.encoding_mask`; ``symmetric`` mirrors them about the echo).
     The remaining keywords are the core's (``null_M1``, ``null_M2``, ``maxwell``, ``spectral_freq``, ``pns``,
     ``pns_target``, ``heat_eta``, ``n_axes``, ``n_restarts``, ``maxiter``, ``seed``). Returns a
@@ -262,7 +261,7 @@ def _design_in_mask(b_delta, *, limits, TE, n_t, on, sign_idx, timing, store_idx
     if pns:                                                   # SAFE PNS <= pns_target % at every t
         safe_hw = limits.safe_model                           # the catalogue's coefficients; the solver is here
         if safe_hw is None:
-            raise ValueError("pns=True needs the SAFE coefficients, which dmipy-sim's catalogue does not carry")
+            raise ValueError("pns=True needs the SAFE coefficients, which dmipy-replay's catalogue does not carry")
         pkern = _safe_kernels(dt * 1e3, n_t - 1, safe_hw)     # physical gradient = g (not s·g)
         def c_pns(x):                                         # one row per timepoint, all >= 0
             G3 = np.zeros((n_t, 3)); G3[:, :na] = gof(x)

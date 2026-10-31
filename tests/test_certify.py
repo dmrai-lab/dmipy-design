@@ -15,7 +15,6 @@ import pytest
 # `certify` reaches into dmipy-sim for the band basis and the cited scanner catalogue,
 # so it belongs to the same optional tier as `replay_design` -- the `core` CI job installs
 # neither. Same guard that test_replay_design.py uses.
-pytest.importorskip("dmipy_sim")
 
 from dmipy_design.certify import (replay_envelope, sup_replay_error, k_min, certify,
                                   k_for_walk, ReplayEnvelope, Certificate, SupResult, BandWalk,
@@ -28,8 +27,7 @@ FAST = dict(steps=60, restarts=4)
 
 def _free_walk(n_w, T_max, K, seed=0, D=D0):
     import dmipy_sim as ds
-    return ds.simulate_trajectories(n_walkers=n_w, diffusivity=D, geometry=ds.FreeDiffusion(), T_max=T_max,
-                                    seed=seed, K=K, require_gpu=False)
+    return ds.walk(ds.spec.spec_of(ds.FreeDiffusion()), n_w, T_max, diffusivity=D, seed=seed, K=K, require_gpu=False)
 
 
 @pytest.fixture(scope="module")
@@ -208,7 +206,7 @@ def test_the_certified_bandwidth_is_the_duration_invariant(free):
 def test_k_for_walk_is_the_producers_derivation():
     """The band count of a window is dmipy-sim's one derivation: ``ceil(2 T f)`` with ``f`` a stated bandwidth
     or the scanner class's storage band (its certified band times the storage margin, dmipy-sim#643)."""
-    from dmipy_sim.replay.bank import mode_count, storage_band_hz
+    from dmipy_replay.replay.storage import mode_count, storage_band_hz
     assert k_for_walk(0.060, bandwidth_hz=267.0) == 33            # ceil(2 * 0.060 * 267)
     assert k_for_walk(0.100, bandwidth_hz=267.0) == 54
     assert k_for_walk(0.200, bandwidth_hz=267.0) == 107

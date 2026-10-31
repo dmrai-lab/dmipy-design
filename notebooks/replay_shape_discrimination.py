@@ -3,7 +3,7 @@ Substrate Commons canonical replay-pack dataset.
 
 This is the substrate-informed acquisition-design pivot: instead of re-simulating (or replaying raw
 trajectory arrays) for each candidate waveform, we replay pre-computed `.rpk` packs. The signal is a
-cheap, differentiable matmul on the pack's stored bands (`dmipy_sim.replay`), so the waveform is
+cheap, differentiable matmul on the pack's stored bands (`dmipy_replay.replay`), so the waveform is
 optimized by gradient descent *through* the stored Monte-Carlo substrate, in the pack's own band basis.
 
 The packs are coefficient-form packs (bands on the window's continuous sine basis, RPK.md 9.5): a pack of
@@ -19,8 +19,8 @@ where the dataset holds the canonical packs, e.g.
 import os
 import numpy as np
 
-from dmipy_sim.replay import ReplayPack, compile_scheme, replay_signal
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.replay.replay import ReplayPack, compile_scheme, replay_signal
+from dmipy_replay.constants import GAMMA
 from dmipy_design.replay_design import design_discriminating_waveform, DESIGN_RASTER
 
 

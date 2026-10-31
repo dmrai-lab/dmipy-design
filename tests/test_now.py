@@ -5,7 +5,7 @@ import pytest
 from dmipy_design import ScannerLimits
 from dmipy_design.optimizers import design_waveform_now, NowDesign
 
-LIM = ScannerLimits.of("siemens_prisma")            # 80 mT/m, 200 T/m/s, from dmipy-sim's cited catalogue
+LIM = ScannerLimits.of("siemens_prisma")            # 80 mT/m, 200 T/m/s, from dmipy-replay's cited catalogue
 
 
 @pytest.mark.parametrize("name,b_delta", [("LTE", 1.0), ("PTE", -0.5), ("STE", 0.0)])
@@ -36,7 +36,7 @@ def test_no_spectral_constraint_is_pgse_like_low_frequency():
     assert d.spectral_rms < 40.0                     # a single-lobe PGSE-like waveform
 
 
-def test_the_design_is_dmipy_sims_acquisition_object():
+def test_the_design_is_the_acquisition_object():
     """to_sequence() is the ScannerSequence dmipy-sim simulates: the physical gradient with the 180 at TE/2,
     the budget's finite pulses, the b the designer reported, refocused, and rescalable to a target b."""
     d = design_waveform_now(1.0, limits=LIM, TE=0.08, n_t=72, n_restarts=3, seed=0)
