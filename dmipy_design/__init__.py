@@ -2,12 +2,12 @@
 
 Design deliverable gradient waveforms for diffusion MRI under real scanner limits, in the
 **instant-pulse** approximation (ideal hard RF). This package is the OPTIMISATION; what it optimises
-inside and what it produces are dmipy-sim's:
+inside and what it produces are dmipy-replay's:
 
-- the scanner's limits are :class:`dmipy_sim.acquisition.scanners.ScannerLimits` (the cited catalogue; every
+- the scanner's limits are :class:`dmipy_replay.acquisition.scanners.ScannerLimits` (the cited catalogue; every
   designer takes one as ``limits``);
-- the timing budget is :class:`dmipy_sim.acquisition.timing.SequenceTiming` (re-exported here);
-- a design's ``to_sequence()`` is a :class:`dmipy_sim.acquisition.scanner_sequence.ScannerSequence`, the one
+- the timing budget is :class:`dmipy_replay.acquisition.timing.SequenceTiming` (re-exported here);
+- a design's ``to_sequence()`` is a :class:`dmipy_replay.acquisition.scanner_sequence.ScannerSequence`, the one
   acquisition object dmipy-sim simulates, replays and exports.
 
 - **NOW** (``design_waveform_now``) — the SQP design oracle: maximise the b-value of a
@@ -29,11 +29,11 @@ inside and what it produces are dmipy-sim's:
   scanner-runnable ``.seq``, and offline checks (timing, realized Gmax/slew, b-tensor round-trip, PNS).
   Requires the ``[pulseq]`` extra.
 
-The NOW / timing / PGSTE core needs NumPy + SciPy and dmipy-sim (the object).
+The NOW / timing / PGSTE core needs NumPy + SciPy and dmipy-replay (the object); the certificate and the Pulseq
+export read dmipy-sim.
 """
-from dmipy_sim.acquisition.scanners import ScannerLimits
+from dmipy_replay.acquisition.scanners import ScannerLimits
 
-from .constraints import TimeConstraints
 from .optimizers import (
     SequenceTiming,
     DEFAULT_TIMING,
@@ -50,7 +50,6 @@ from .optimizers import (
 
 __all__ = [
     "ScannerLimits",
-    "TimeConstraints",
     "SequenceTiming",
     "DEFAULT_TIMING",
     "encoding_mask",

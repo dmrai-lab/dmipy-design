@@ -1,17 +1,17 @@
 """Optimize gradient waveforms *through* replay packs — substrate-informed acquisition design.
 
 A pack is fixed; the waveform g(t) is the optimization variable; the diffusion-weighted signal is a matmul on
-the pack's stored bands (``dmipy_sim.replay``), and its gradient w.r.t. the waveform is closed-form — so waveform
+the pack's stored bands (``dmipy_replay.replay``), and its gradient w.r.t. the waveform is closed-form — so waveform
 design is gradient descent through the stored Monte-Carlo substrate, with no autodiff (this package is
 NumPy/SciPy-only: fully numpy-analytic derivatives → SciPy L-BFGS-B).
 
 First use case: **shape/size discrimination** — given two packs (e.g. a cylinder and a sphere, or two
 diameters), find the deliverable waveform that maximally separates their signals, ``max_g |E_A - E_B|``.
 
-The signal of one 1-axis waveform ``g(t)`` (direction ``d`` fixed) against a pack is dmipy-sim's own replay
+The signal of one 1-axis waveform ``g(t)`` (direction ``d`` fixed) against a pack is dmipy-replay's own replay
 forward: ``phi_i = C_i . W(g)`` with ``C`` the pack's position coefficients (per axis the window's exact start and
 displacement, then its ``K`` sine bands on the continuous basis) and ``W(g) = M g`` the waveform's band projection
-(``dmipy_sim.replay.compression.band_projection_matrix`` along ``d``, LINEAR in ``g``), ``E = |<w exp(i phi)>| /
+(``dmipy_replay.replay.compression.band_projection_matrix`` along ``d``, LINEAR in ``g``), ``E = |<w exp(i phi)>| /
 sum(w)``, and the analytic gradient chains back through ``M``:
 
     dE/dW = (1/|S|) Re( conj(S) * i * <w exp(i phi) C> ) / W0,   dE/dg = M^T dE/dW.
@@ -45,8 +45,8 @@ def design_raster(limits, dt=None):
 
 
 def load_pack(path):
-    """Load an ``.rpk`` replay pack (thin wrapper over :meth:`dmipy_sim.replay.ReplayPack.load`)."""
-    from dmipy_sim.replay import ReplayPack
+    """Load an ``.rpk`` replay pack (thin wrapper over :meth:`dmipy_replay.replay.ReplayPack.load`)."""
+    from dmipy_replay.replay.replay import ReplayPack
     return ReplayPack.load(path)
 
 
@@ -63,24 +63,24 @@ class DiscriminationResult:
     max_slew: float = None   # realized peak slew [T/m/s]
 
     def to_sequence(self):
-        """The designed waveform as a dmipy-sim ``ScannerSequence``: a self-refocusing gradient echo (no pulse
+        """The designed waveform as a dmipy-replay ``ScannerSequence``: a self-refocusing gradient echo (no pulse
         is folded; the structural refocusing of the design makes it refocus on its own)."""
-        from dmipy_sim.sequences import from_waveform
+        from dmipy_replay.sequences import from_waveform
         return from_waveform(np.asarray(self.G, np.float32)[None], self.dt, self.direction[None])
 
 
 class _PackForward:
-    """Analytic E(g) and dE/dg for one pack along a fixed direction: dmipy-sim's own replay forward.
+    """Analytic E(g) and dE/dg for one pack along a fixed direction: dmipy-replay's own replay forward.
 
     The pack replays a waveform through its band projection, ``phi_i = C_i . W(g)`` with ``C`` the pack's position
     coefficients (``pack.position_coeffs``) and ``W(g) = M g`` the waveform's projection on the pack's bands
-    (``dmipy_sim.replay.compression.band_projection_matrix`` over the window, times ``gamma``, along ``d``). So
+    (``dmipy_replay.replay.compression.band_projection_matrix`` over the window, times ``gamma``, along ``d``). So
     ``E(g)`` is exactly what ``pack.replay`` returns for the same waveform, and ``dE/dg = M^T dE/dW`` is
     closed-form -- no autodiff, no second copy of the replay mathematics here.
     """
 
     def __init__(self, pack, direction, gamma, dt, n_t):
-        from dmipy_sim.replay.compression import band_projection_matrix
+        from dmipy_replay.replay.compression import band_projection_matrix
         self.dt, self.n_t, self.T = float(dt), int(n_t), float(pack.T_window)
         d = np.asarray(direction, np.float64)
         C = np.asarray(pack.position_coeffs, np.float64)                  # (n_walkers, K+2, 3)
@@ -108,7 +108,7 @@ def design_discriminating_waveform(pack_a, pack_b, *, limits, direction=(1.0, 0.
                                    te=None, dt=None, n_basis=16, n_restarts=4, maxiter=300,
                                    seed=0, refocus_weight=50.0, slew_weight=_MIN_SLEW_PENALTY):
     """Design a single deliverable gradient waveform that maximally discriminates ``pack_a`` from
-    ``pack_b`` (both :class:`dmipy_sim.replay.ReplayPack`), i.e. ``max_g |E_A(g) - E_B(g)|``.
+    ``pack_b`` (both :class:`dmipy_replay.replay.ReplayPack`), i.e. ``max_g |E_A(g) - E_B(g)|``.
 
     The 1-axis waveform g(t) is a synthesis of ``n_basis`` of the packs' own band basis, the window's sines
     ``sin(pi k t / T)`` for ``k = 1..n_basis`` (``n_basis`` at most the smaller pack's ``K``: the design never
@@ -118,16 +118,16 @@ def design_discriminating_waveform(pack_a, pack_b, *, limits, direction=(1.0, 0.
     Optimized by SciPy L-BFGS-B with the analytic gradient (no autodiff), warm-started from the best plain PGSE
     (a cold start sits at ~zero contrast gradient), multi-restart.
 
-    ``limits`` (a :class:`~dmipy_sim.acquisition.scanners.ScannerLimits`, or anything ``ScannerLimits.of``
+    ``limits`` (a :class:`~dmipy_replay.acquisition.scanners.ScannerLimits`, or anything ``ScannerLimits.of``
     resolves) bounds the amplitude (``|g| <= G_max`` via tanh) and adds a soft slew penalty at its slew rate so
     the waveform is scanner-deliverable (the smooth basis already band-limits slew; this bounds it explicitly).
     ``te`` restricts the encoding to a window ``[0, te]`` (the waveform is zero after; the echo forms at ``te`` --
     the pack's TE-prefix property), which bounds ``b`` to a realistic range. Both packs must share the window
     ``T`` (``pack.T_window``); ``K`` may differ. Returns a :class:`DiscriminationResult`.
     """
-    from dmipy_sim.acquisition.scanners import ScannerLimits
-    from dmipy_sim.acquisition.waveforms import b_from_gradient
-    from dmipy_sim.constants import GAMMA
+    from dmipy_replay.acquisition.scanners import ScannerLimits
+    from dmipy_replay.acquisition.waveforms import b_from_gradient
+    from dmipy_replay.constants import GAMMA
     limits = ScannerLimits.of(limits)
     G_max, slew_max = float(limits.G_max), float(limits.slew_max)
 

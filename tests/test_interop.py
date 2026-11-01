@@ -8,7 +8,6 @@ import warnings
 import numpy as np
 import pytest
 
-pytest.importorskip("dmipy_sim")
 pytest.importorskip("dmipy_fit")
 
 import dmipy_sim as ds
@@ -32,7 +31,7 @@ def _design():
 def _multi_b_scheme(d, fracs):
     """A multi-b acquisition scheme from one design, scaling amplitude (b ∝ |G|²): the designed physical
     gradient at every fraction, as one ScannerSequence with n_meas rows, wrapped by dmipy-fit's scheme."""
-    from dmipy_sim.sequences import from_btensor_waveform
+    from dmipy_replay.sequences import from_btensor_waveform
     G = np.stack([np.asarray(d.G) * np.sqrt(f) for f in fracs]).astype(np.float32)
     return AcquisitionScheme(from_btensor_waveform(G, d.dt, echo_idx=d.echo_idx, timing=d.timing))
 

@@ -3,16 +3,15 @@
 Two slab packs of different thickness (dmipy-sim's producer, packed by its bank; the ``slab_packs`` fixture),
 which is exactly the *size discrimination* case. Checks that the optimizer finds a deliverable waveform whose
 signals separate the two substrates, beating a naive PGSE baseline, and that the differentiable replay forward
-is the engine's own. Skipped if dmipy_sim is absent.
+is the engine's own.
 """
 import numpy as np
 import numpy.testing as npt
 import pytest
 
-pytest.importorskip("dmipy_sim")
 
-from dmipy_sim.replay import compile_scheme, replay_signal
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.replay.replay import compile_scheme, replay_signal
+from dmipy_replay.constants import GAMMA
 from dmipy_design.replay_design import design_discriminating_waveform, DESIGN_RASTER
 
 from conftest import SLAB_T as T, SLAB_K as K
@@ -92,4 +91,4 @@ def test_the_result_is_a_sequence(packs):
     seq = res.to_sequence()
     assert seq.n_meas == 1 and not seq.rf and seq.refocusing_residual < 1e-2
     npt.assert_allclose(seq.b(), [res.b_value], rtol=1e-5)
-    npt.assert_allclose(pa.replay(seq, tissue=None)[0], res.E_A, atol=2e-3)
+    npt.assert_allclose(pa.replay(seq, tissue=None, tol=None)[0], res.E_A, atol=2e-3)

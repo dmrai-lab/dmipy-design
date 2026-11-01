@@ -4,7 +4,7 @@ import pytest
 
 from dmipy_design.optimizers import design_refocusing_rf, RfPulseDesign
 from dmipy_design.optimizers.rf_pulse import _inversion_mz
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.constants import GAMMA
 
 
 def _design(**kw):
@@ -108,28 +108,19 @@ def test_times_axis_is_centred():
     assert t.shape == d.B1.shape and t.mean() == pytest.approx(0.0, abs=1e-12)
 
 
-# ── dmipy-sim bridge ────────────────────────────────────────────────────────────
-_HAS_B1PULSE = False
-_HAS_BIR4 = False
-try:
-    from dmipy_sim.acquisition.rf import B1Pulse, bloch_simulate  # noqa: F401
-    _HAS_B1PULSE = True
-    _HAS_BIR4 = hasattr(B1Pulse, "bir4")
-except Exception:
-    pass
+# ── dmipy-replay bridge ─────────────────────────────────────────────────────────
+from dmipy_replay.acquisition.rf import B1Pulse, bloch_simulate
 
 
-@pytest.mark.skipif(not _HAS_BIR4, reason="dmipy-sim with the BIR-4 constructor not installed")
-def test_warm_start_from_sim_bir4():
-    """design can pull a dmipy-sim constructor (BIR-4) as the initial guess and refine it."""
+def test_warm_start_from_replay_bir4():
+    """design can pull a dmipy-replay constructor (BIR-4) as the initial guess and refine it."""
     ws = B1Pulse.bir4(180, 6e-3, 1e-4, peak_b1=19e-6)
     d = design_refocusing_rf(rf_duration=6e-3, dt=1e-4, B1_max=19e-6, n_b1=7, n_off_resonance=7,
                              warm_start=ws)
     assert d.refocusing_efficiency > 0.9                   # already-robust warm start, refined
 
 
-@pytest.mark.skipif(not _HAS_B1PULSE, reason="dmipy-sim with B1Pulse not installed")
-def test_to_b1pulse_round_trips_into_sim():
+def test_to_b1pulse_round_trips_into_replay():
     d = _design(n_b1=7, n_off_resonance=7, n_mu=14)
     p = d.to_b1pulse()
     np.testing.assert_allclose(p.b1, d.B1, rtol=0, atol=0)      # exact complex envelope
@@ -140,7 +131,7 @@ def test_to_b1pulse_round_trips_into_sim():
 
 
 def test_to_rf_event_puts_the_designed_pulse_in_a_schedule():
-    from dmipy_sim.acquisition.rf import RFEvent, RFSchedule
+    from dmipy_replay.acquisition.rf import RFEvent, RFSchedule
     d = _design(n_b1=5, n_off_resonance=5, n_mu=6)
     e = d.to_rf_event(20e-3)
     assert isinstance(e, RFEvent) and e.label == "refocus"

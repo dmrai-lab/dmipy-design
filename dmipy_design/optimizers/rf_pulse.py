@@ -37,7 +37,7 @@ are power-hungry (they spend well over the energy of a minimal hard 180° — th
 following the field robustly); ``sar_headroom`` optionally caps the SAR proxy ``∫|B1|²dt`` as a
 multiple of the hard-180° energy by lowering ``A0``.
 
-Needs only NumPy + SciPy.  ``d.to_b1pulse()`` hands the design to dmipy-sim's Bloch forward.
+Needs only NumPy + SciPy.  ``d.to_b1pulse()`` hands the design to dmipy-replay's Bloch forward.
 
 NOTE — adiabatic *full passage* imparts a $B_0/B_1$-dependent phase, so as a **refocusing** pulse
 it is used as a matched **pair** (double adiabatic refocusing, e.g. LASER) to cancel that phase;
@@ -51,7 +51,7 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.optimize import minimize_scalar
 
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.constants import GAMMA
 
 
 @dataclass
@@ -118,17 +118,17 @@ class RfPulseDesign:
         return (np.arange(n) - (n - 1) / 2.0) * self.dt
 
     def to_b1pulse(self, label="refocus"):
-        """The designed envelope as a dmipy-sim ``B1Pulse``: the complex ``B1`` array (Tesla) is the
-        ground-truth transmit waveform, so the pulse drops straight into dmipy-sim's Bloch forward /
+        """The designed envelope as a dmipy-replay ``B1Pulse``: the complex ``B1`` array (Tesla) is the
+        ground-truth transmit waveform, so the pulse drops straight into dmipy-replay's Bloch forward /
         slice-profile -- the RF mirror of ``NowDesign.to_sequence``."""
-        from dmipy_sim.acquisition.rf import B1Pulse
+        from dmipy_replay.acquisition.rf import B1Pulse
         return B1Pulse(b1=self.B1.astype(np.complex128), dt=self.dt, label=label)   # its flip is gamma int |B1| dt
 
     def to_rf_event(self, t_s, label="refocus", axis_deg=0.0):
         """The designed pulse as the ``RFEvent`` a ScannerSequence's schedule holds: centred at ``t_s``, its
         duration and flip those of the envelope it carries (an adiabatic passage's integrated nutation is well
         over 180 degrees; the LABEL says it refocuses, which is what the coherence bookkeeping reads)."""
-        from dmipy_sim.acquisition.rf import RFEvent
+        from dmipy_replay.acquisition.rf import RFEvent
         pulse = self.to_b1pulse(label)
         return RFEvent(float(t_s), float(np.degrees(pulse.nominal_flip_rad)), label, axis_deg=float(axis_deg),
                        duration_s=float(pulse.duration), envelope=pulse)

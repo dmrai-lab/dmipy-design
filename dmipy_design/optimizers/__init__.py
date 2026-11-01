@@ -1,7 +1,7 @@
 """Gradient-waveform designers and the shared timing utilities.
 
 - ``design_waveform_now`` / ``NowDesign`` — the NOW SQP design oracle (LTE/PTE/STE/OGSE).
-- ``SequenceTiming`` (dmipy-sim's budget) / ``DEFAULT_TIMING`` / ``encoding_mask`` / ``stimulated_echo_mask`` /
+- ``SequenceTiming`` (dmipy-replay's budget) / ``DEFAULT_TIMING`` / ``encoding_mask`` / ``stimulated_echo_mask`` /
   ``encoding_spectrum`` — a budget read on a grid (incl. the derived pre/post-180 asymmetry) and the encoding
   power spectrum.
 - ``design_stimulated_echo`` — PGSTE design via the NOW core.

@@ -27,10 +27,10 @@ scanner-runnable Pulseq `.seq`.
 - **Pulseq I/O** (`dmipy_design.pulseq_export`). Export a design to a scanner-runnable spin-echo
   `.seq` on real vendor limits, and run the offline acceptance checks (timing, realized
   Gmax/slew, b-tensor round-trip, PNS via the SAFE model).
-- **Scanner limits are data, not numbers here.** Every designer takes `limits=` -- dmipy-sim's cited
+- **Scanner limits are data, not numbers here.** Every designer takes `limits=` -- dmipy-replay's cited
   `ScannerLimits` (`ScannerLimits.of("siemens_prisma")`, a certificate class, or an explicit `(G_max, slew)`
   envelope); the SAFE PNS *solver* lives in NOW, the coefficients it reads come with the limits. What a
-  designer produces is dmipy-sim's acquisition object: `design.to_sequence()` is a `ScannerSequence` built
+  designer produces is dmipy-replay's acquisition object: `design.to_sequence()` is a `ScannerSequence` built
   to its timing budget, the thing dmipy-sim simulates, replays and exports.
 
 **Scope (instant-pulse):** RF pulses are ideal and instantaneous. Finite-RF-pulse optimization
@@ -39,7 +39,7 @@ and CRLB/Fisher-information experiment design are **not** part of this package.
 ## Install
 
 ```bash
-pip install dmipy-design                 # NOW + timing + PGSTE (NumPy/SciPy + dmipy-sim, the object)
+pip install dmipy-design                 # NOW + timing + PGSTE (NumPy/SciPy + dmipy-replay, the object, + dmipy-sim)
 pip install "dmipy-design[pulseq]"       # + scanner-runnable .seq export (pypulseq)
 ```
 
@@ -56,7 +56,7 @@ prisma = ScannerLimits.of("siemens_prisma")          # 80 mT/m, 200 T/m/s, cited
 # max-b LTE waveform under Prisma limits, with M1/M2 nulled (default)
 d = design_waveform_now(b_delta=1.0, limits=prisma, TE=0.08, timing=timing)
 print(d.b_value, d.feasible, d.max_slew, d.refocus_residual)
-seq = d.to_sequence()                                # dmipy-sim's ScannerSequence: simulate / replay / export it
+seq = d.to_sequence()                                # dmipy-replay's ScannerSequence: simulate / replay / export it
 
 # STE (isotropic) and an OGSE-like waveform at ~80 Hz
 ste  = design_waveform_now(b_delta=0.0, limits=prisma, TE=0.08)
@@ -101,8 +101,4 @@ pytest -q tests/test_pulseq_export.py   # the Pulseq round-trip
 
 ## License
 
-See [LICENSE](LICENSE).
-
-## License
-
-Dual-licensed: **GNU AGPL-3.0** for open-source use, or a **commercial license** for proprietary use; see [LICENSING.md](LICENSING.md) (commercial: rutger.fick@dmrai-lab.org).
+Dual-licensed: **GNU AGPL-3.0** ([LICENSE](LICENSE)) for open-source use, or a **commercial license** for proprietary use; see [LICENSING.md](LICENSING.md) (commercial: rutger.fick@dmrai-lab.org).

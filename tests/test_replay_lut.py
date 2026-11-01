@@ -1,13 +1,12 @@
 """Parametric-family response LUT (T3): the precomputed table matches the exact replay forward, the
 best-discriminating-b lookup agrees with a direct sweep, and the discriminability map orders by size
-separation. Slab packs from dmipy-sim's producer (the ``slab_packs`` fixture). Skipped if dmipy_sim absent."""
+separation. Slab packs from dmipy-sim's producer (the ``slab_packs`` fixture)."""
 import numpy as np
 import numpy.testing as npt
 import pytest
 
-pytest.importorskip("dmipy_sim")
-from dmipy_sim.replay import compile_scheme, replay_signal
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.replay.replay import compile_scheme, replay_signal
+from dmipy_replay.constants import GAMMA
 from dmipy_design.replay_lut import (pgse_response_lut, lut_pgse, best_discriminating_pgse,
                                      discriminability_matrix)
 
@@ -33,7 +32,7 @@ def test_lut_matches_replay(family):
     assert seq.dt == pytest.approx(DT)
     direct = replay_signal(packs[0], compile_scheme(np.asarray(seq.G_eff, np.float64), seq.dt, packs[0].K, GAMMA, T=T))[0]
     npt.assert_allclose(E[0, 5], direct, atol=1e-9)
-    assert packs[0].replay(seq, tissue=None)[0] == pytest.approx(direct, abs=1e-6)   # the pack reads the object too
+    assert packs[0].replay(seq, tissue=None, tol=None)[0] == pytest.approx(direct, abs=1e-6)   # the pack reads the object too
 
 
 def test_best_discriminating_b(family):

@@ -1,12 +1,11 @@
 """Joint gradient + B1 co-design (T4): the pipeline returns a discriminating gradient (replayed through
 the packs) and a substrate-robust refocusing pulse that beats a hard pulse over the transmit ensemble,
 and the delivered contrast = ideal contrast x refocusing efficiency. Slab packs from dmipy-sim's producer
-(the ``slab_packs`` fixture); skipped if dmipy_sim absent."""
+(the ``slab_packs`` fixture)."""
 import numpy as np
 import numpy.testing as npt
 import pytest
 
-pytest.importorskip("dmipy_sim")
 from dmipy_design.replay_codesign import codesign_waveform_and_b1
 
 from conftest import SLAB_T as T

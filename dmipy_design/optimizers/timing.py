@@ -1,7 +1,7 @@
 """The timing budget a design is built to, and the encoding masks the NOW core optimises inside.
 
 The budget itself -- where the gradient may not be on: the excitation lead-in, the refocusing window at
-TE/2, the readout tail -- is dmipy-sim's :class:`~dmipy_sim.acquisition.timing.SequenceTiming`, re-exported
+TE/2, the readout tail -- is dmipy-replay's :class:`~dmipy_replay.acquisition.timing.SequenceTiming`, re-exported
 here: the object a designed sequence carries is the object the designer read. What this module adds is the
 designer's reading of a budget on a grid:
 
@@ -19,14 +19,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from dmipy_sim.acquisition.timing import SequenceTiming
-from dmipy_sim.constants import GAMMA
+from dmipy_replay.acquisition.timing import SequenceTiming
+from dmipy_replay.constants import GAMMA
 
 __all__ = ["SequenceTiming", "DEFAULT_TIMING", "encoding_mask", "stimulated_echo_mask", "encoding_spectrum"]
 
 #: A typical clinical diffusion spin-echo budget (a 3 ms 90, a 6 ms 180 with its crushers, a 14 ms readout
 #: tail before the echo): what a designer uses when the caller states none. It is a statement about the
-#: SEQUENCE, not about a scanner; scanner limits come from dmipy-sim's catalogue.
+#: SEQUENCE, not about a scanner; scanner limits come from dmipy-replay's catalogue.
 DEFAULT_TIMING = SequenceTiming(t_excite=3e-3, t_refocus=6e-3, t_readout_pre_echo=14e-3)
 
 
@@ -59,7 +59,7 @@ def encoding_mask(timing, TE, n_t, *, symmetric=False):
 def stimulated_echo_mask(timing, TM, TE, n_t):
     """The two matched transverse windows of a stimulated echo on an ``n_t`` grid over ``[0, TE]``.
 
-    dmipy-sim's stimulated-echo assembler: the excitation, a lead ``d``, the first encoding period, the store
+    dmipy-replay's stimulated-echo assembler: the excitation, a lead ``d``, the first encoding period, the store
     (a 90 of ``t_excite``), the mixing time ``TM`` on z, the recall (another), the second period, the same
     lead before the echo -- so the time transverse before the store equals the time after the recall (the
     PGSTE analogue of a 180 at TE/2, which is what refocuses a static field) and ``TE = 2 t_store + TM``.
@@ -90,7 +90,7 @@ def encoding_spectrum(seq):
     The rigorous spectral-content quantity (Stepišnik): the diffusion signal is ``ln S ≈ −∫ D(ω)·|q̃(ω)|² dω``,
     so a waveform is characterised -- for ANY shape, pure or broadband -- by this spectrum, not by a nominal
     "frequency". Returns ``(freqs_Hz, power, centroid_Hz, bandwidth_Hz, rms_Hz)`` (one-sided) for the first
-    measurement of ``seq`` (a :class:`~dmipy_sim.acquisition.scanner_sequence.ScannerSequence`).
+    measurement of ``seq`` (a :class:`~dmipy_replay.acquisition.scanner_sequence.ScannerSequence`).
     """
     G = np.asarray(seq.G_eff, dtype=np.float64)[0]                # (n_t, 3), the pulses folded in
     dt = float(seq.dt)

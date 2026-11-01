@@ -1,4 +1,4 @@
-"""PGSTE -- stimulated-echo design via the NOW core, in dmipy-sim's stimulated-echo layout."""
+"""PGSTE -- stimulated-echo design via the NOW core, in dmipy-replay's stimulated-echo layout."""
 import numpy as np
 import pytest
 

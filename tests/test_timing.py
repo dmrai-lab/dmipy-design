@@ -1,4 +1,4 @@
-"""The budget is dmipy-sim's SequenceTiming; the designer reads it on a grid -- the encoding windows, with
+"""The budget is dmipy-replay's SequenceTiming; the designer reads it on a grid -- the encoding windows, with
 the derived (not free-knob) pre/post-180 asymmetry, and the stimulated echo's matched periods."""
 import numpy as np
 import pytest
@@ -7,9 +7,9 @@ from dmipy_design.optimizers import (SequenceTiming, DEFAULT_TIMING, encoding_ma
                                      encoding_spectrum)
 
 
-def test_the_budget_is_dmipy_sims():
-    from dmipy_sim.acquisition.timing import SequenceTiming as SimTiming
-    assert SequenceTiming is SimTiming
+def test_the_budget_is_replays():
+    from dmipy_replay.acquisition.timing import SequenceTiming as ReplayTiming
+    assert SequenceTiming is ReplayTiming
     assert DEFAULT_TIMING.min_TE() > 0
 
 
@@ -76,7 +76,7 @@ def test_stimulated_echo_periods_are_matched_around_the_mixing_time():
 
 
 def test_encoding_spectrum_reads_a_sequence():
-    from dmipy_sim.sequences import ogse, pgse
+    from dmipy_replay.sequences import ogse, pgse
     lo = pgse([[1, 0, 0]], 8e-3, 24e-3, bvalues=[1e9], n_t=400, slew_rate=np.inf)
     hi = ogse([[1, 0, 0]], 100.0, 20e-3, shape="cosine", bvalues=[1e9], n_t=400, slew_rate=np.inf)
     f_lo = encoding_spectrum(lo)[4]
