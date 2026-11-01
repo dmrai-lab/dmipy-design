@@ -13,9 +13,9 @@ env:
   # this revision was tested against (dmipy-sim: the head of dmipy-sim#852, which makes `simulate`'s pack state its
   # acquisition's scanner class). Move each ref forward when the releases land and `pip install` resolves them from
   # PyPI instead.
-  DMIPY_SIM_REF: 3c007d418320ad16a217ed3a2b6c0c9b953eedbe
+  DMIPY_SIM_REF: 9be89dc6607762b66bc262723b4c7c6fda3189d7
   DMIPY_REPLAY_REF: 38110c577804e8d122b556ac556d2214b5401262
-  DMIPY_FIT_REF: f32d44ce314d50b86ed0fe4fc73af623c5902276
+  DMIPY_FIT_REF: 54c4c95c6d27f710125e767d354c181150403377
 jobs:
   core:
     # NOW / timing / PGSTE / the replay certificate — NumPy + SciPy + the two dmipy packages, fast feedback
