@@ -6,7 +6,7 @@ import numpy.testing as npt
 import pytest
 
 from dmipy_replay.replay.replay import compile_scheme, replay_signal
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 from dmipy_design.replay_lut import (pgse_response_lut, lut_pgse, best_discriminating_pgse,
                                      discriminability_matrix)
 

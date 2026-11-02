@@ -11,11 +11,12 @@ for :data:`ENVELOPE`, packed by its bank; the tests read subsets of its walkers 
 """
 import numpy as np
 import pytest
+from dmipy_analytic.constants import GAMMA
 from dmipy_replay import Envelope
 
 from dmipy_design.certify import (deliverable_set, sup_replay_error, k_min, certify,
                                   DeliverableSet, Certificate, SupResult, BandWalk,
-                                  _objective, _projection, GAMMA)
+                                  _objective, _projection)
 
 D0, T, K_STORED = 2e-9, 0.016, 64
 DT = 1e-4                    # the test deliverable sets' raster: 160 samples over the window

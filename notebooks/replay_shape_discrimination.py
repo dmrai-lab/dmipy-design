@@ -20,7 +20,7 @@ import os
 import numpy as np
 
 from dmipy_replay.replay.replay import ReplayPack, compile_scheme, replay_signal
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 from dmipy_design.replay_design import design_discriminating_waveform, DESIGN_RASTER
 
 

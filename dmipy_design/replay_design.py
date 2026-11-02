@@ -127,7 +127,7 @@ def design_discriminating_waveform(pack_a, pack_b, *, limits, direction=(1.0, 0.
     """
     from dmipy_replay.acquisition.scanners import ScannerLimits
     from dmipy_replay.acquisition.waveforms import b_from_gradient
-    from dmipy_replay.constants import GAMMA
+    from dmipy_analytic.constants import GAMMA
     limits = ScannerLimits.of(limits)
     G_max, slew_max = float(limits.G_max), float(limits.slew_max)
 

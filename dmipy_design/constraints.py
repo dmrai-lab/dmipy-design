@@ -111,7 +111,7 @@ def waveform_problem(*, n_t, n_axes, dt, echo, encoding_mask=None, G_max=0.08,
     """
     import numpy as np
     import scipy.sparse as sp
-    from dmipy_replay.constants import GAMMA
+    from dmipy_analytic.constants import GAMMA
 
     enc = (np.ones(n_t, bool) if encoding_mask is None else np.asarray(encoding_mask, bool))
     nr = max(1, int(np.ceil(G_max / (slew_rate_max * dt))))
