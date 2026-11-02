@@ -27,8 +27,8 @@ that export to a scanner via Pulseq.
   scanner's gradient raster. The substrate-informed counterpart to NOW's substrate-blind b-maximiser.
 - **Replay certificate** — `certify.py`: the sup of the replay error over the deliverable set
   (`ReplayEnvelope`, the same `WaveformProblem` NOW optimises over) within a pack's stored band,
-  the pack's walk-free truncation term quoted beyond it; `k_for_walk` is dmipy-sim's one derivation
-  of a window's band count (the scanner class's band, dmipy-sim#643).
+  the pack's walk-free truncation term quoted beyond it; a window's band count is dmipy-replay's one
+  derivation (`mode_count`; a scanner class's band is its `Envelope`'s, `envelope_of`).
 
 **NOT here (still out of scope):**
 - CRLB / Fisher-information optimal experiment design.
@@ -114,7 +114,7 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 | `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B in the packs' band basis); the result's `to_sequence()` is a self-refocusing gradient echo |
 | `replay_lut.py` | `pgse_response_lut` — a pack family lowered to its PGSE response over a b-grid; `best_discriminating_pgse`, `discriminability_matrix` |
 | `replay_codesign.py` | `codesign_waveform_and_b1` — the discriminating gradient and the robust refocusing pulse as one pipeline |
-| `certify.py` | `certify`, `certify_pools`, `sup_replay_error`, `BandWalk`, `k_for_walk` — Eq. (4) on a pack's stored bands over a `ReplayEnvelope` |
+| `certify.py` | `certify`, `certify_pools`, `sup_replay_error`, `BandWalk` — Eq. (4) on a pack's stored bands over a `ReplayEnvelope` |
 | `constraints.py` | `waveform_problem` / `WaveformProblem` (the deliverable-waveform set as an SLSQP problem); a scanner's limits are dmipy-replay's `ScannerLimits` |
 
 ## Tests
@@ -127,3 +127,7 @@ pytest -q tests/test_pulseq_export.py       # Pulseq round-trip (needs [pulseq];
 Correctness is defined by the suite: NOW designs are feasible with machine-precision constraint
 residuals; LTE reaches higher b than STE; `spectral_freq` drives `spectral_rms` to target; the
 timing windows are asymmetric-by-derivation; the assembled `.seq` encodes the designed b-tensor.
+
+The test packs are walked for an `Envelope` (`dmipy_sim.walk(..., envelope=)` has no default): a scanner class's
+(`dmipy_replay.envelope_of`) or one stated field by field. A pack states the envelope of its walk, its band narrowed
+to the band it stores.

@@ -25,21 +25,22 @@ for _v in (
 import pytest
 
 SLAB_N_WALKERS, SLAB_K, SLAB_T, SLAB_D0 = 600, 40, 0.1, 2e-9
-#: the scanner class the slab packs state: a pack replays only the waveforms its class can deliver
+#: the scanner class the slab packs are walked for (:func:`dmipy_replay.envelope_of`): a pack replays only the
+#: acquisitions its envelope admits, here the class's per-axis amplitude and the ``SLAB_K`` bands the pack stores
 SLAB_SCANNER_CLASS = "connectome_2"
 
 
 def _slab_pack(L, seed):
     """A reflecting slab of thickness ``L`` (dmipy-sim's :class:`~dmipy_sim.geometry.Box1D`, free along y, z) walked
-    over one 100 ms window at ``SLAB_K`` bands and packed, the size-discrimination substrate."""
+    for ``SLAB_SCANNER_CLASS`` over one 100 ms window at ``SLAB_K`` bands and packed, the size-discrimination
+    substrate. The pack states the envelope its walk carries."""
     import dmipy_sim as ds
+    from dmipy_replay import envelope_of
     from dmipy_sim.geometry import Box1D
     from dmipy_sim.replay.bank import build_replay_pack
-    from dmipy_sim.replay.compression import default_envelope
     walk = ds.walk(ds.spec.spec_of(Box1D(L)), SLAB_N_WALKERS, SLAB_T, diffusivity=SLAB_D0, seed=seed, K=SLAB_K,
-                   require_gpu=False)
-    return build_replay_pack(walk, id=f"test/slab-{seed}", license="CC-BY-4.0", citation="test", K=SLAB_K,
-                             envelope=dict(default_envelope(), scanner=SLAB_SCANNER_CLASS))
+                   require_gpu=False, envelope=envelope_of(SLAB_SCANNER_CLASS))
+    return build_replay_pack(walk, id=f"test/slab-{seed}", license="CC-BY-4.0", citation="test", K=SLAB_K)
 
 
 @pytest.fixture(scope="session")

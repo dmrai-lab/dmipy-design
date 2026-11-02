@@ -6,28 +6,31 @@ projection that admits waveforms no scanner can play (the sup is over the wrong 
 feasible set that drifts from the one the NOW designer optimises over (the pack under-certifies
 exactly the waveforms this package can produce).
 
-The walks are dmipy-sim's producer's, free diffusion over one 16 ms window stored at 64 bands (2 kHz), packed
-by its bank; the tests read subsets of its walkers as :class:`BandWalk`.
+The walks are dmipy-sim's producer's, free diffusion over one 16 ms window stored at 64 bands (2 kHz) and walked
+for :data:`ENVELOPE`, packed by its bank; the tests read subsets of its walkers as :class:`BandWalk`.
 """
 import numpy as np
 import pytest
-
-# `certify` reaches into dmipy-sim for the band basis and the cited scanner catalogue,
-# so it belongs to the same optional tier as `replay_design` -- the `core` CI job installs
-# neither. Same guard that test_replay_design.py uses.
+from dmipy_replay import Envelope
 
 from dmipy_design.certify import (replay_envelope, sup_replay_error, k_min, certify,
-                                  k_for_walk, ReplayEnvelope, Certificate, SupResult, BandWalk,
+                                  ReplayEnvelope, Certificate, SupResult, BandWalk,
                                   _objective, _projection, GAMMA)
 
 D0, T, K_STORED = 2e-9, 0.016, 64
 DT = 1e-4                    # the test envelopes' raster: 160 samples over the window
 FAST = dict(steps=60, restarts=4)
+#: the envelope the walks are walked for and the packs state: the band they store, ``K_STORED`` bands over ``T``
+#: (2 kHz), and the largest per-axis gradient of the deliverable sets certified below (the 3 T/m insert); no field
+#: and no contact tier, which free diffusion has none of
+ENVELOPE = Envelope(name="dmipy-design tests", band_hz=K_STORED / (2 * T), G_max=3.0, B0_list=(), chi_max=None,
+                    rho2_max=None, max_refocusing_pulses=None)
 
 
 def _free_walk(n_w, T_max, K, seed=0, D=D0):
     import dmipy_sim as ds
-    return ds.walk(ds.spec.spec_of(ds.FreeDiffusion()), n_w, T_max, diffusivity=D, seed=seed, K=K, require_gpu=False)
+    return ds.walk(ds.spec.spec_of(ds.FreeDiffusion()), n_w, T_max, diffusivity=D, seed=seed, K=K, require_gpu=False,
+                   envelope=ENVELOPE)
 
 
 @pytest.fixture(scope="module")
@@ -203,19 +206,12 @@ def test_the_certified_bandwidth_is_the_duration_invariant(free):
         f"certified bandwidth moved with duration: {fc} Hz (it must not)"
 
 
-def test_k_for_walk_is_the_producers_derivation():
-    """The band count of a window is dmipy-sim's one derivation: ``ceil(2 T f)`` with ``f`` a stated bandwidth
-    or the scanner class's storage band (its certified band times the storage margin, dmipy-sim#643)."""
-    from dmipy_replay.replay.storage import mode_count, storage_band_hz
-    assert k_for_walk(0.060, bandwidth_hz=267.0) == 33            # ceil(2 * 0.060 * 267)
-    assert k_for_walk(0.100, bandwidth_hz=267.0) == 54
-    assert k_for_walk(0.200, bandwidth_hz=267.0) == 107
-    f = storage_band_hz("siemens_prisma")
-    assert k_for_walk(0.1, scanner="siemens_prisma") == mode_count(0.1, "siemens_prisma") == int(np.ceil(0.2 * f))
-    with pytest.raises(ValueError, match="certified band"):          # a class the catalogue holds no band for
-        k_for_walk(0.1, scanner="siemens_magnetom_terra_7T")
-    with pytest.raises(ValueError, match="bandwidth_hz"):
-        k_for_walk(0.1)
+def test_a_certificates_band_count_is_the_producers_derivation():
+    """Another window's band count for a certificate is dmipy-replay's one derivation, ``ceil(2 T f_c)``."""
+    from dmipy_replay.replay.storage import mode_count
+    cert = Certificate(f_c=267.0, K=33, T=0.060, eps=5e-3, envelope={}, K_stored=64)
+    for T_, K_ in ((0.060, 33), (0.100, 54), (0.200, 107)):                 # ceil(2 * T * 267)
+        assert cert.k_for(T_) == mode_count(T_, 267.0) == K_
 
 
 def test_the_holdout_runs_below_the_certificate(free):
