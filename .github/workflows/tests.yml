@@ -10,12 +10,12 @@ env:
   MKL_NUM_THREADS: "1"
   JAX_PLATFORMS: cpu   # dmipy-sim/fit pull JAX; CI is CPU-only
   # The 3.0 line is not on PyPI yet (dmipy-sim 3.0, dmipy-replay 0.2, dmipy-fit 3.0): CI installs each from the commit
-  # this revision was tested against (dmipy-sim: the head of dmipy-sim#852, which makes `simulate`'s pack state its
-  # acquisition's scanner class). Move each ref forward when the releases land and `pip install` resolves them from
-  # PyPI instead.
-  DMIPY_SIM_REF: 491b945d7d68503def0cdc5d4f490ac9f1b76c16
-  DMIPY_REPLAY_REF: 38110c577804e8d122b556ac556d2214b5401262
-  DMIPY_FIT_REF: 7f7ce4cef88dd53f13932ef7ade323ccf300bba9
+  # this revision was tested against: dmipy-sim and dmipy-replay at their mains at the end of the replay move
+  # (dmipy-sim#834; their Envelope, dmipy-sim#855 and dmipy-replay#11), dmipy-fit at the merge of dmipy-fit#58. Move
+  # each ref forward when the releases land and `pip install` resolves them from PyPI instead.
+  DMIPY_SIM_REF: 87618f8984747e127a8ff4f929d60eb148a1ecda
+  DMIPY_REPLAY_REF: 85da6252d57b31dd55aaeb1038acea5856630a8d
+  DMIPY_FIT_REF: a89a55b890c462aa3f9f90c4a7314b97b7c70c3d
 jobs:
   core:
     # NOW / timing / PGSTE / the replay certificate — NumPy + SciPy + the two dmipy packages, fast feedback
