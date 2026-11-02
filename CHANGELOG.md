@@ -23,5 +23,5 @@ dmipy-design designs deliverable diffusion-MRI acquisitions under real scanner l
   explicit `(G_max, slew)` pair) and returns a `ScannerSequence` built to its timing budget; Pulseq export writes a
   scanner-runnable `.seq`.
 - **Pairs with** dmipy-replay `>=0.2,<0.3` and dmipy-sim `>=3,<4`; the `interop` extra adds dmipy-fit `>=3,<4` for the
-  design-simulate-fit tests, the `pulseq` extra pypulseq `>=1.4`. Python >= 3.10.
+  design-simulate-fit tests, the `pulseq` extra pypulseq `>=1.4`. Python >= 3.10, NumPy >= 2.0.
 - **Licence** AGPL-3.0-only or commercial.
