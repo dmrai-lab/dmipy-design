@@ -26,7 +26,7 @@ that export to a scanner via Pulseq.
   in the pack's own band basis (the window's sines, `n_basis <= K`) + PGSE warm start, on the
   scanner's gradient raster. The substrate-informed counterpart to NOW's substrate-blind b-maximiser.
 - **Replay certificate** — `certify.py`: the sup of the replay error over the deliverable set
-  (`ReplayEnvelope`, the same `WaveformProblem` NOW optimises over) within a pack's stored band,
+  (`DeliverableSet`, the same `WaveformProblem` NOW optimises over) within a pack's stored band,
   the pack's walk-free truncation term quoted beyond it; a window's band count is dmipy-replay's one
   derivation (`mode_count`; a scanner class's band is its `Envelope`'s, `envelope_of`).
 
@@ -114,7 +114,7 @@ round-trip, SAFE PNS). Needs the `[pulseq]` extra (dmipy-sim + pypulseq).
 | `replay_design.py` | `design_discriminating_waveform` — substrate-informed waveform design by replaying `.rpk` packs (analytic-gradient L-BFGS-B in the packs' band basis); the result's `to_sequence()` is a self-refocusing gradient echo |
 | `replay_lut.py` | `pgse_response_lut` — a pack family lowered to its PGSE response over a b-grid; `best_discriminating_pgse`, `discriminability_matrix` |
 | `replay_codesign.py` | `codesign_waveform_and_b1` — the discriminating gradient and the robust refocusing pulse as one pipeline |
-| `certify.py` | `certify`, `certify_pools`, `sup_replay_error`, `BandWalk` — Eq. (4) on a pack's stored bands over a `ReplayEnvelope` |
+| `certify.py` | `DeliverableSet` / `deliverable_set` (a scanner class's deliverable waveforms, slew included), `certify`, `certify_pools`, `sup_replay_error`, `BandWalk` — Eq. (4) on a pack's stored bands over a `DeliverableSet`; a pack's physical `Envelope` is dmipy-replay's |
 | `constraints.py` | `waveform_problem` / `WaveformProblem` (the deliverable-waveform set as an SLSQP problem); a scanner's limits are dmipy-replay's `ScannerLimits` |
 
 ## Tests

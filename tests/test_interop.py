@@ -10,7 +10,6 @@ import pytest
 
 pytest.importorskip("dmipy_fit")
 
-import dmipy_replay as dr
 import dmipy_sim as ds
 from dmipy_design import ScannerLimits, design_waveform_now
 
@@ -40,7 +39,7 @@ def _multi_b_scheme(d, fracs):
 def test_design_b_matches_sim():
     """The b-value the designer reports is the b dmipy-replay computes for the same sequence."""
     d = _design()
-    b_sim = float(np.asarray(dr.calc_b(d.to_sequence())).ravel()[0])
+    b_sim = float(np.asarray(d.to_sequence().b()).ravel()[0])
     assert abs(b_sim - d.b_value) / d.b_value < 1e-3        # same language, no drift
 
 
