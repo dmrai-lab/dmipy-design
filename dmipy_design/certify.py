@@ -482,14 +482,17 @@ def k_min(walk, envelope, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 
 # ------------------------------------------------------------- certified bandwidth
 def k_for_walk(T, *, scanner=None, bandwidth_hz=None):
     """Bands a window of duration ``T`` (s) needs to carry a band: ``K = ceil(2 T f)``, the one derivation every
-    producer reads (:func:`dmipy_replay.replay.storage.mode_count`), with ``f`` the storage band of the scanner class
-    ``scanner`` (its certified band times the storage margin, dmipy-sim#643; a class the catalogue holds no
-    certified band for is refused by name) or a stated ``bandwidth_hz``. Mode ``k`` of the bridge is the sine at
-    ``f_k = k / (2T)``, so the band count is just a bandwidth expressed on this particular window."""
+    producer reads (:func:`dmipy_replay.replay.storage.mode_count`), with ``f`` the band of the scanner class
+    ``scanner`` (:func:`dmipy_replay.envelope_of`: its certified band times the storage margin; a class the catalogue
+    holds no certified band for is refused by name) or a stated ``bandwidth_hz``, one of the two. Mode ``k`` of the
+    bridge is the sine at ``f_k = k / (2T)``, so the band count is just a bandwidth expressed on this particular
+    window."""
+    from dmipy_replay import envelope_of
     from dmipy_replay.replay.storage import mode_count
-    if scanner is None and bandwidth_hz is None:
-        raise ValueError("give the scanner class whose band the walk carries, or a bandwidth_hz")
-    return int(mode_count(float(T), scanner, temporal_bandwidth_hz=bandwidth_hz))
+    if (scanner is None) == (bandwidth_hz is None):
+        raise ValueError("give the scanner class whose band the walk carries, or a bandwidth_hz: one of the two")
+    f = envelope_of(scanner).band_hz if bandwidth_hz is None else bandwidth_hz
+    return int(mode_count(float(T), f))
 
 
 @dataclass
