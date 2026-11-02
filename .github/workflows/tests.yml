@@ -10,14 +10,15 @@ env:
   MKL_NUM_THREADS: "1"
   JAX_PLATFORMS: cpu   # dmipy-sim/fit pull JAX; CI is CPU-only
   # The 3.0 line is not on PyPI yet (dmipy-analytic 3.0, dmipy-sim 3.0, dmipy-replay 0.2, dmipy-fit 3.0): CI installs
-  # each from the commit this revision was tested against: dmipy-analytic, dmipy-sim and dmipy-replay at the merge of
-  # dmipy-analytic#3 and the heads of dmipy-sim#884 and dmipy-replay#26 (the forms imported from dmipy-analytic; a merge commit keeps
-  # each reachable on main), dmipy-fit at the merge of dmipy-fit#58. Move each ref forward when the releases land and
-  # `pip install` resolves them from PyPI instead.
-  DMIPY_ANALYTIC_REF: 784830d26e4ec15a5dae4a03f2d01000b73bed1b
+  # each from the commit this revision was tested against: dmipy-analytic at the head of dmipy-analytic#4 (fit's forms,
+  # merged on main), dmipy-sim and dmipy-replay at the heads of dmipy-sim#884 and dmipy-replay#26 (the forms imported
+  # from dmipy-analytic), dmipy-fit at the head of dmipy-fit#64 (its signal models on dmipy-analytic's forms); a merge
+  # commit keeps each reachable on main. Move each ref forward when the releases land and `pip install` resolves them
+  # from PyPI instead.
+  DMIPY_ANALYTIC_REF: d2283d5eb392820c303ab78b2cd06d4a945b0d1a
   DMIPY_SIM_REF: ae69cc1f3986753e4fb0677e8c1f788de1698d02
   DMIPY_REPLAY_REF: fa2274ffeb8cf5a4e7608582dda9f67d5e350662
-  DMIPY_FIT_REF: a89a55b890c462aa3f9f90c4a7314b97b7c70c3d
+  DMIPY_FIT_REF: 4f14dd77c40b3c99057dcce8337dfe7de56daa64
 jobs:
   core:
     # NOW / timing / PGSTE / the replay certificate — NumPy + SciPy + the two dmipy packages, fast feedback
