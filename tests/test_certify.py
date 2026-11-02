@@ -14,7 +14,7 @@ import pytest
 from dmipy_replay import Envelope
 
 from dmipy_design.certify import (replay_envelope, sup_replay_error, k_min, certify,
-                                  k_for_walk, ReplayEnvelope, Certificate, SupResult, BandWalk,
+                                  ReplayEnvelope, Certificate, SupResult, BandWalk,
                                   _objective, _projection, GAMMA)
 
 D0, T, K_STORED = 2e-9, 0.016, 64
@@ -206,25 +206,12 @@ def test_the_certified_bandwidth_is_the_duration_invariant(free):
         f"certified bandwidth moved with duration: {fc} Hz (it must not)"
 
 
-def test_k_for_walk_is_the_producers_derivation():
-    """The band count of a window is dmipy-replay's one derivation: ``ceil(2 T f)`` with ``f`` a stated bandwidth or
-    the band of a scanner class (its envelope's: the certified band times the storage margin), one of the two."""
-    from dmipy_replay import envelope_of
+def test_a_certificates_band_count_is_the_producers_derivation():
+    """Another window's band count for a certificate is dmipy-replay's one derivation, ``ceil(2 T f_c)``."""
     from dmipy_replay.replay.storage import mode_count
-    assert k_for_walk(0.060, bandwidth_hz=267.0) == 33            # ceil(2 * 0.060 * 267)
-    assert k_for_walk(0.100, bandwidth_hz=267.0) == 54
-    assert k_for_walk(0.200, bandwidth_hz=267.0) == 107
-    envelope = envelope_of("siemens_prisma")
-    f = envelope.band_hz
-    # the walk reads the band count from the envelope, the pack builder from mode_count of the band
-    assert k_for_walk(0.1, scanner="siemens_prisma") == envelope.mode_count(0.1) == mode_count(0.1, f) \
-        == int(np.ceil(0.2 * f))
-    with pytest.raises(ValueError, match="certified band"):          # a class the catalogue holds no band for
-        k_for_walk(0.1, scanner="siemens_magnetom_terra_7T")
-    with pytest.raises(ValueError, match="bandwidth_hz"):
-        k_for_walk(0.1)
-    with pytest.raises(ValueError, match="bandwidth_hz"):            # two bands state none
-        k_for_walk(0.1, scanner="siemens_prisma", bandwidth_hz=267.0)
+    cert = Certificate(f_c=267.0, K=33, T=0.060, eps=5e-3, envelope={}, K_stored=64)
+    for T_, K_ in ((0.060, 33), (0.100, 54), (0.200, 107)):                 # ceil(2 * T * 267)
+        assert cert.k_for(T_) == mode_count(T_, 267.0) == K_
 
 
 def test_the_holdout_runs_below_the_certificate(free):
