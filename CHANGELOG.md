@@ -17,8 +17,9 @@ dmipy-design designs deliverable diffusion-MRI acquisitions under real scanner l
   `codesign_waveform_and_b1` designs the gradient and the refocusing pulse together.
 - **Certificates.** `certify` states the replay band K of a pack as a bandwidth, certified over a `DeliverableSet`: the
   waveforms a scanner class can play. `deliverable_set(model)` builds it from the cited catalogue, or from explicit
-  `G_max` and `slew_rate_max`. It is the set the designers optimise inside, and distinct from a pack's `Envelope`
-  (dmipy-replay), which states what the pack is certified for.
+  `G_max` and `slew_rate_max`; a parameter that takes one is named `deliverable`. It is the set the designers
+  optimise inside, and distinct from a pack's `Envelope` (dmipy-replay), which states what the pack is certified for.
+  `ReplayEnvelope` and `replay_envelope` are refused by name with the new spelling.
 - **Limits and output.** Every designer takes `limits=` (dmipy-replay's cited `ScannerLimits`, a catalogue name, or an
   explicit `(G_max, slew)` pair) and returns a `ScannerSequence` built to its timing budget; Pulseq export writes a
   scanner-runnable `.seq`.
