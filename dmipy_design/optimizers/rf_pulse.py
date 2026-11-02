@@ -51,7 +51,7 @@ import numpy as np
 from dataclasses import dataclass
 from scipy.optimize import minimize_scalar
 
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 
 
 @dataclass

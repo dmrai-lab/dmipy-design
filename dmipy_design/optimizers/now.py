@@ -36,7 +36,7 @@ from scipy.optimize import minimize
 from dataclasses import dataclass
 
 from dmipy_replay.acquisition.scanners import ScannerLimits
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 
 from .timing import DEFAULT_TIMING, encoding_mask
 

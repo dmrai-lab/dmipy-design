@@ -32,7 +32,7 @@ def pgse_response_lut(packs, b_grid, *, delta=None, Delta=None, direction=(1.0, 
     ``direction``. Returns ``E`` of shape ``(n_packs, n_b)`` (exact replay at each node). ``delta``/``Delta``
     default to a symmetric split of the packs' window (``delta = T / 5``, ``Delta = 3 T / 5``)."""
     from dmipy_replay.replay.replay import compile_scheme, replay_signal
-    from dmipy_replay.constants import GAMMA
+    from dmipy_analytic.constants import GAMMA
     packs = list(packs)
     T = float(packs[0].T_window)
     if any(abs(float(p.T_window) - T) > 1e-12 * T for p in packs):

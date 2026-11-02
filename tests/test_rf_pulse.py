@@ -4,7 +4,7 @@ import pytest
 
 from dmipy_design.optimizers import design_refocusing_rf, RfPulseDesign
 from dmipy_design.optimizers.rf_pulse import _inversion_mz
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 
 
 def _design(**kw):

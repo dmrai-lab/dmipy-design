@@ -27,6 +27,8 @@ dependencies = [
     # the acquisition object a design produces, the timing budget it is built to and the cited scanner
     # limits it is built under live in dmipy-replay; this package is the optimisation over them
     "dmipy-replay>=0.2,<0.3",
+    # the physical constants (GAMMA, GAMMA_BAR) are dmipy-analytic's, the one copy the stack imports
+    "dmipy-analytic>=3,<4",
     # the replay certificate reads dmipy-sim's coefficient walks, and the Pulseq export is its writer
     "dmipy-sim>=3,<4",
 ]

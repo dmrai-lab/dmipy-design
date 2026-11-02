@@ -49,7 +49,7 @@ import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 from .constraints import waveform_problem
 
 __all__ = ["DeliverableSet", "deliverable_set", "BandWalk", "SupResult", "Certificate",

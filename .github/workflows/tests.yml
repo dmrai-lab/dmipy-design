@@ -9,13 +9,16 @@ env:
   OPENBLAS_NUM_THREADS: "1"
   MKL_NUM_THREADS: "1"
   JAX_PLATFORMS: cpu   # dmipy-sim/fit pull JAX; CI is CPU-only
-  # The 3.0 line is not on PyPI yet (dmipy-sim 3.0, dmipy-replay 0.2, dmipy-fit 3.0): CI installs each from the commit
-  # this revision was tested against: dmipy-sim and dmipy-replay at the heads of dmipy-sim#883 and dmipy-replay#25
-  # (a sequence's b spelled `seq.b()`, `PoolSpec`; a merge commit keeps each reachable on main), dmipy-fit at the merge
-  # of dmipy-fit#58. Move each ref forward when the releases land and `pip install` resolves them from PyPI instead.
-  DMIPY_SIM_REF: 21753a2375780b2e53c651198be607f7c852c257
-  DMIPY_REPLAY_REF: 9594afe66251f29db707b63a0d826a375b0a250f
-  DMIPY_FIT_REF: a89a55b890c462aa3f9f90c4a7314b97b7c70c3d
+  # The 3.0 line is not on PyPI yet (dmipy-analytic 3.0, dmipy-sim 3.0, dmipy-replay 0.2, dmipy-fit 3.0): CI installs
+  # each from the commit this revision was tested against: dmipy-analytic at the head of dmipy-analytic#4 (fit's forms,
+  # merged on main), dmipy-sim and dmipy-replay at the heads of dmipy-sim#884 and dmipy-replay#26 (the forms imported
+  # from dmipy-analytic), dmipy-fit at the head of dmipy-fit#64 (its signal models on dmipy-analytic's forms); a merge
+  # commit keeps each reachable on main. Move each ref forward when the releases land and `pip install` resolves them
+  # from PyPI instead.
+  DMIPY_ANALYTIC_REF: d2283d5eb392820c303ab78b2cd06d4a945b0d1a
+  DMIPY_SIM_REF: ae69cc1f3986753e4fb0677e8c1f788de1698d02
+  DMIPY_REPLAY_REF: fa2274ffeb8cf5a4e7608582dda9f67d5e350662
+  DMIPY_FIT_REF: 4f14dd77c40b3c99057dcce8337dfe7de56daa64
 jobs:
   core:
     # NOW / timing / PGSTE / the replay certificate — NumPy + SciPy + the two dmipy packages, fast feedback
@@ -30,7 +33,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: |
           pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@${DMIPY_SIM_REF}" \
-                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}"
+                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}" \
+                      "dmipy-analytic[special,jax] @ git+https://github.com/dmrai-lab/dmipy-analytic@${DMIPY_ANALYTIC_REF}"
           pip install --no-deps -e .     # its dmipy-sim / dmipy-replay bounds name the releases above
           pip install pytest pytest-cov
       - run: pytest -q --ignore=tests/test_pulseq_export.py --ignore=tests/test_interop.py
@@ -45,7 +49,8 @@ jobs:
           python-version: "3.12"
       - run: |
           pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@${DMIPY_SIM_REF}" \
-                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}"
+                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}" \
+                      "dmipy-analytic[special,jax] @ git+https://github.com/dmrai-lab/dmipy-analytic@${DMIPY_ANALYTIC_REF}"
           pip install --no-deps -e .
           pip install pytest "pypulseq>=1.4"
       - run: pytest -q tests/test_pulseq_export.py
@@ -60,7 +65,8 @@ jobs:
           python-version: "3.12"
       - run: |
           pip install "dmipy-sim @ git+https://github.com/dmrai-lab/dmipy-sim@${DMIPY_SIM_REF}" \
-                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}"
+                      "dmipy-replay @ git+https://github.com/dmrai-lab/dmipy-replay@${DMIPY_REPLAY_REF}" \
+                      "dmipy-analytic[special,jax] @ git+https://github.com/dmrai-lab/dmipy-analytic@${DMIPY_ANALYTIC_REF}"
           pip install --no-deps "dmipy-fit @ git+https://github.com/dmrai-lab/dmipy-fit@${DMIPY_FIT_REF}"
           pip install --no-deps -e .
           pip install pytest dipy "jax[cpu]"

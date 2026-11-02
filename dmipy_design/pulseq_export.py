@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 
 from dmipy_replay.acquisition.scanners import ScannerLimits
-from dmipy_replay.constants import GAMMA, GAMMA_BAR
+from dmipy_analytic.constants import GAMMA, GAMMA_BAR
 from dmipy_sim.sequences.pulseq import _require_pypulseq, make_system, to_pulseq
 
 def design_to_pulseq(design, *, scanner='siemens_prisma', filename=None, system=None):
