@@ -214,8 +214,11 @@ def test_k_for_walk_is_the_producers_derivation():
     assert k_for_walk(0.060, bandwidth_hz=267.0) == 33            # ceil(2 * 0.060 * 267)
     assert k_for_walk(0.100, bandwidth_hz=267.0) == 54
     assert k_for_walk(0.200, bandwidth_hz=267.0) == 107
-    f = envelope_of("siemens_prisma").band_hz
-    assert k_for_walk(0.1, scanner="siemens_prisma") == mode_count(0.1, f) == int(np.ceil(0.2 * f))
+    envelope = envelope_of("siemens_prisma")
+    f = envelope.band_hz
+    # the walk reads the band count from the envelope, the pack builder from mode_count of the band
+    assert k_for_walk(0.1, scanner="siemens_prisma") == envelope.mode_count(0.1) == mode_count(0.1, f) \
+        == int(np.ceil(0.2 * f))
     with pytest.raises(ValueError, match="certified band"):          # a class the catalogue holds no band for
         k_for_walk(0.1, scanner="siemens_magnetom_terra_7T")
     with pytest.raises(ValueError, match="bandwidth_hz"):
