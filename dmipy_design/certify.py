@@ -54,7 +54,7 @@ from .constraints import waveform_problem
 
 __all__ = ["ReplayEnvelope", "replay_envelope", "BandWalk", "SupResult", "Certificate",
            "PoolCertificate", "sup_replay_error", "k_min", "certify",
-           "certify_pools", "k_for_walk"]
+           "certify_pools"]
 
 
 @dataclass(frozen=True)
@@ -479,19 +479,6 @@ def k_min(walk, envelope, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 
     return None, sups
 
 
-# ------------------------------------------------------------- certified bandwidth
-def k_for_walk(T, *, scanner=None, bandwidth_hz=None):
-    """Bands a window of duration ``T`` (s) needs to carry a band: ``K = ceil(2 T f)``, the one derivation every
-    producer reads (:func:`dmipy_replay.replay.storage.mode_count`), with ``f`` the storage band of the scanner class
-    ``scanner`` (its certified band times the storage margin, dmipy-sim#643; a class the catalogue holds no
-    certified band for is refused by name) or a stated ``bandwidth_hz``. Mode ``k`` of the bridge is the sine at
-    ``f_k = k / (2T)``, so the band count is just a bandwidth expressed on this particular window."""
-    from dmipy_replay.replay.storage import mode_count
-    if scanner is None and bandwidth_hz is None:
-        raise ValueError("give the scanner class whose band the walk carries, or a bandwidth_hz")
-    return int(mode_count(float(T), scanner, temporal_bandwidth_hz=bandwidth_hz))
-
-
 @dataclass
 class Certificate:
     """What a pack promises, in units that do not depend on how long the window was.
@@ -521,8 +508,10 @@ class Certificate:
     n_walkers: int = 0
 
     def k_for(self, T):
-        """Bands another window of duration ``T`` needs to carry this same certificate."""
-        return k_for_walk(T, bandwidth_hz=self.f_c)
+        """Bands another window of duration ``T`` needs to carry this same certificate: dmipy-replay's one derivation
+        of a window's band count, ``ceil(2 T f_c)`` (:func:`dmipy_replay.replay.storage.mode_count`)."""
+        from dmipy_replay.replay.storage import mode_count
+        return int(mode_count(float(T), self.f_c))
 
     def admits(self, f_hz):
         """Whether a waveform whose highest meaningful frequency is ``f_hz`` is covered."""
@@ -632,8 +621,10 @@ class PoolCertificate:
         return self.rows[name]
 
     def k_store(self, T):
-        """Bands a window of ``T`` must store so EVERY selectable subset is covered."""
-        return k_for_walk(T, bandwidth_hz=self.f_c)
+        """Bands a window of ``T`` must store so EVERY selectable subset is covered: ``ceil(2 T f_c)`` with the binding
+        row's band (:func:`dmipy_replay.replay.storage.mode_count`)."""
+        from dmipy_replay.replay.storage import mode_count
+        return int(mode_count(float(T), self.f_c))
 
     def describe(self):
         name, cert = self.binding
