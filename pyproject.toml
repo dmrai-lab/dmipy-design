@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dmipy-design"
-version = "2.0.1"
-description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE) over dmipy-sim's acquisition object and scanner limits, Pulseq I/O — instant-pulse public scope"
+version = "3.0.0"
+description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE) over dmipy-replay's acquisition object and scanner limits, Pulseq I/O — instant-pulse public scope"
 readme = "README.md"
 license = { text = "AGPL-3.0-only OR LicenseRef-Commercial" }  # dual-licensed; see LICENSING.md
 authors = [
