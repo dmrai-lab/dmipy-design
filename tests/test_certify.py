@@ -1,4 +1,4 @@
-"""Eq. (4) certification: the scanner envelope, the sup within the stored band, and the bandwidth it certifies.
+"""Eq. (4) certification: the deliverable set, the sup within the stored band, and the bandwidth it certifies.
 
 Three things here would make a certificate worse than no certificate, and each has a test:
 a wrong ascent gradient (the sup becomes a random number wearing a proof's clothes), a
@@ -13,12 +13,12 @@ import numpy as np
 import pytest
 from dmipy_replay import Envelope
 
-from dmipy_design.certify import (replay_envelope, sup_replay_error, k_min, certify,
-                                  ReplayEnvelope, Certificate, SupResult, BandWalk,
+from dmipy_design.certify import (deliverable_set, sup_replay_error, k_min, certify,
+                                  DeliverableSet, Certificate, SupResult, BandWalk,
                                   _objective, _projection, GAMMA)
 
 D0, T, K_STORED = 2e-9, 0.016, 64
-DT = 1e-4                    # the test envelopes' raster: 160 samples over the window
+DT = 1e-4                    # the test deliverable sets' raster: 160 samples over the window
 FAST = dict(steps=60, restarts=4)
 #: the envelope the walks are walked for and the packs state: the band they store, ``K_STORED`` bands over ``T``
 #: (2 kHz), and the largest per-axis gradient of the deliverable sets certified below (the 3 T/m insert); no field
@@ -51,8 +51,8 @@ def walk(free, n_w=400):
     return free.take(np.arange(n_w))
 
 
-def env(G_max=0.08, slew=200.0, name="t", **kw):
-    return replay_envelope(G_max=G_max, slew_rate_max=slew, raster=DT, name=name, **kw)
+def deliverable(G_max=0.08, slew=200.0, name="t", **kw):
+    return deliverable_set(G_max=G_max, slew_rate_max=slew, raster=DT, name=name, **kw)
 
 
 def test_a_pack_and_a_coefficient_walk_read_as_the_same_band_walk(free_pack):
@@ -76,7 +76,7 @@ def test_a_pack_and_a_coefficient_walk_read_as_the_same_band_walk(free_pack):
 def test_the_ascent_gradient_matches_finite_differences(free):
     """An ascent on a wrong gradient still returns a number, and the number means nothing."""
     bw = walk(free)
-    e = env()
+    e = deliverable()
     n_t = int(round(T / DT))
     prob = e.problem(n_t, DT)
     fun = _objective(prob, bw.C, 16, _projection(n_t, DT, T, bw.K))
@@ -100,7 +100,7 @@ def test_the_returned_waveform_is_the_one_that_scored_the_sup(free):
     n_t = int(round(T / DT))
     P = _projection(n_t, DT, T, bw.K)
     for gmax, slew, K in ((0.3, 200.0, 4), (0.3, 200.0, 32), (3.0, 3000.0, 4), (3.0, 3000.0, 8)):
-        e = env(gmax, slew)                                                           # the last two: the adversary kills
+        e = deliverable(gmax, slew)                                                   # the last two: the adversary kills
         r, x = sup_replay_error(bw, K, e, seed=1, **FAST)                             # the signal
         prob = e.problem(n_t, DT)
         again = -_objective(prob, bw.C, K, P)(x)[0]
@@ -109,9 +109,9 @@ def test_the_returned_waveform_is_the_one_that_scored_the_sup(free):
 
 def test_the_winning_waveform_is_actually_deliverable(free):
     """A sup over waveforms the hardware cannot play certifies nothing at all."""
-    r, _ = sup_replay_error(walk(free), 16, env(), **FAST)
+    r, _ = sup_replay_error(walk(free), 16, deliverable(), **FAST)
     G = r.waveform
-    assert G.shape == (int(round(T / DT)), 3)                      # on the envelope's raster
+    assert G.shape == (int(round(T / DT)), 3)                      # on the deliverable set's raster
     assert np.abs(G).max() <= 0.08 * (1 + 1e-6)
     assert np.abs(np.diff(G, axis=0)).max() / DT <= 200.0 * (1 + 1e-4)
     # normalised the way NOW judges its own designs (refocus_residual < 1e-2), rather than
@@ -124,7 +124,7 @@ def test_the_winning_waveform_is_actually_deliverable(free):
 
 
 def test_moment_order_one_also_nulls_the_first_moment(free):
-    r, _ = sup_replay_error(walk(free), 16, env(null_M1=True), **FAST)
+    r, _ = sup_replay_error(walk(free), 16, deliverable(null_M1=True), **FAST)
     n_t = int(round(T / DT))
     t = np.arange(n_t) * DT
     m1 = np.linalg.norm((t[:, None] * r.waveform).sum(0) * DT) / (0.08 * T ** 2)
@@ -134,9 +134,9 @@ def test_moment_order_one_also_nulls_the_first_moment(free):
 def test_the_sup_is_taken_within_the_stored_band(free):
     "The stored band against itself is zero by construction, and beyond it is the pack's own term, not a sup."
     with pytest.raises(ValueError, match="stored band"):
-        sup_replay_error(walk(free), K_STORED, env(), **FAST)
+        sup_replay_error(walk(free), K_STORED, deliverable(), **FAST)
     with pytest.raises(ValueError, match="stored band"):
-        sup_replay_error(walk(free), K_STORED + 8, env(), **FAST)
+        sup_replay_error(walk(free), K_STORED + 8, deliverable(), **FAST)
 
 
 def test_the_certificate_is_taken_over_the_same_set_the_designer_optimises_over():
@@ -150,7 +150,7 @@ def test_the_certificate_is_taken_over_the_same_set_the_designer_optimises_over(
     G_max, slew = 0.08, 200.0
     d = design_waveform_now(b_delta=1.0, limits=(G_max, slew), TE=0.06, n_t=120,
                             null_M1=False, null_M2=False, n_restarts=2, maxiter=60)
-    e = replay_envelope(G_max=G_max, slew_rate_max=slew, name="shared")
+    e = deliverable_set(G_max=G_max, slew_rate_max=slew, name="shared")
     prob = e.problem(d.G.shape[0], d.dt, echo=d.echo_idx)
     assert np.abs(d.G).max() <= prob.G_max * 1.02
     assert np.abs(np.diff(d.G, axis=0)).max() / d.dt <= prob.slew_rate_max * 1.02
@@ -162,24 +162,24 @@ def test_the_certificate_is_taken_over_the_same_set_the_designer_optimises_over(
 def test_connectom_certifies_against_its_diffusion_slew():
     """The PNS-derated limit binds a diffusion sequence, and it is the difference between
     Connectom being the easiest class to certify and looking like the hardest."""
-    assert replay_envelope("siemens_magnetom_connectom_3T").slew_rate_max == pytest.approx(62.5)
-    assert replay_envelope("siemens_magnetom_connectom_3T",
+    assert deliverable_set("siemens_magnetom_connectom_3T").slew_rate_max == pytest.approx(62.5)
+    assert deliverable_set("siemens_magnetom_connectom_3T",
                            regime="default").slew_rate_max == pytest.approx(200.0)
-    assert replay_envelope("siemens_magnetom_connectom_3T").raster == pytest.approx(10e-6)   # the class's raster
+    assert deliverable_set("siemens_magnetom_connectom_3T").raster == pytest.approx(10e-6)   # the class's raster
 
 
-def test_an_envelope_needs_a_model_or_explicit_limits():
+def test_a_deliverable_set_needs_a_model_or_explicit_limits():
     with pytest.raises(ValueError, match="G_max"):
-        replay_envelope(G_max=0.08)
+        deliverable_set(G_max=0.08)
 
 
-def test_the_sup_falls_with_K_and_rises_with_the_envelope(free):
+def test_the_sup_falls_with_K_and_rises_with_the_deliverable_set(free):
     """Both are physics rather than fitting: more bands only shrink the residual, and a stronger
     gradient only reads that residual harder."""
     bw = walk(free)
     got = {}
     for name, g, s in (("weak", 0.08, 200.0), ("strong", 1.0, 1e4)):
-        e = env(g, s, name)
+        e = deliverable(g, s, name)
         got[name] = [sup_replay_error(bw, K, e, **FAST)[0].sup for K in (8, 16, 32)]
         assert got[name][0] >= got[name][1] >= got[name][2]
     assert all(b > a for a, b in zip(got["weak"], got["strong"]))
@@ -192,7 +192,7 @@ def test_the_sup_falls_with_K_and_rises_with_the_envelope(free):
 def test_the_certified_bandwidth_is_the_duration_invariant(free):
     """K is meaningless without the window it was measured over -- mode k sits at f = k/(2T), so a
     band count and a duration only ever appear together. f_c is what transfers between walks."""
-    e = env()
+    e = deliverable()
     fc = []
     for bw in (free.take(np.arange(600)), BandWalk.of(_free_walk(600, 2 * T, 2 * K_STORED, seed=5))):
         # a converged search, not the FAST settings: an under-explored ascent understates the
@@ -209,7 +209,7 @@ def test_the_certified_bandwidth_is_the_duration_invariant(free):
 def test_a_certificates_band_count_is_the_producers_derivation():
     """Another window's band count for a certificate is dmipy-replay's one derivation, ``ceil(2 T f_c)``."""
     from dmipy_replay.replay.storage import mode_count
-    cert = Certificate(f_c=267.0, K=33, T=0.060, eps=5e-3, envelope={}, K_stored=64)
+    cert = Certificate(f_c=267.0, K=33, T=0.060, eps=5e-3, deliverable={}, K_stored=64)
     for T_, K_ in ((0.060, 33), (0.100, 54), (0.200, 107)):                 # ceil(2 * T * 267)
         assert cert.k_for(T_) == mode_count(T_, 267.0) == K_
 
@@ -218,7 +218,7 @@ def test_the_holdout_runs_below_the_certificate(free):
     """The adversary partly memorises the ensemble, so a waveform fitted on one half reads the
     other half less hard. Certifying on that softer number would under-size K for the pack a
     consumer actually replays -- hence `sup` is the certificate and this is context."""
-    r, _ = sup_replay_error(walk(free, 600), 16, env(0.30, 750.0, "magnus"), holdout=True, **FAST)
+    r, _ = sup_replay_error(walk(free, 600), 16, deliverable(0.30, 750.0, "magnus"), holdout=True, **FAST)
     assert isinstance(r, SupResult) and r.held_out is not None
     assert r.held_out < r.sup
     assert float(r) == r.sup, "float() must give the certificate, not the softer number"
@@ -228,7 +228,7 @@ def test_certify_refuses_rather_than_returning_the_biggest_K_it_tried(free_pack)
     """Silently returning the largest K would ship a pack whose certificate is false: below the stored band
     nothing in the grid meets eps, and the pack's own walk-free term beyond its band does not either."""
     with pytest.raises(ValueError, match="truncation term is"):
-        certify(free_pack, env(3.0, 2e4, "insert"), eps=1e-9, K_grid=(4, 8), **FAST)
+        certify(free_pack, deliverable(3.0, 2e4, "insert"), eps=1e-9, K_grid=(4, 8), **FAST)
 
 
 def test_the_stored_band_is_the_certificate_when_no_sub_band_meets_eps(free_pack):
@@ -237,16 +237,16 @@ def test_the_stored_band_is_the_certificate_when_no_sub_band_meets_eps(free_pack
     states none and is refused there."""
     trunc = free_pack.fidelity["terms"]["truncation"]
     with pytest.warns(RuntimeWarning):                                       # low-N, expected for a fast test
-        c = certify(free_pack, env(), eps=2 * trunc, K_grid=(), **FAST)
+        c = certify(free_pack, deliverable(), eps=2 * trunc, K_grid=(), **FAST)
     assert c.K == c.K_stored == K_STORED and c.f_c == pytest.approx(K_STORED / (2 * T))
     assert c.truncation == pytest.approx(trunc) and c.sups == {}
     assert c.describe()["K_stored"] == K_STORED
     with pytest.raises(ValueError, match="not a pack"):
-        certify(_free_walk(300, T, 8, seed=4), env(), eps=2 * trunc, K_grid=(), **FAST)
+        certify(_free_walk(300, T, 8, seed=4), deliverable(), eps=2 * trunc, K_grid=(), **FAST)
 
 
 def test_k_min_is_decided_by_the_certificate_not_the_holdout(free):
-    K, sups = k_min(walk(free, 600), env(), eps=2e-2, K_grid=(4, 8, 16, 32), holdout=True, **FAST)
+    K, sups = k_min(walk(free, 600), deliverable(), eps=2e-2, K_grid=(4, 8, 16, 32), holdout=True, **FAST)
     if K is not None:
         assert sups[K].sup <= 2e-2
         assert all(sups[k].sup > 2e-2 for k in sups if k < K)
@@ -256,7 +256,7 @@ def test_subsample_is_conservative_not_optimistic(free):
     """Fewer walkers give the adversary MORE room to fit the realisation, so a subsampled search
     may over-state the sup. It must never under-state it, or a cheap search would ship a pack
     certified on a number the full ensemble cannot honour."""
-    e = env()
+    e = deliverable()
     full = sup_replay_error(walk(free, 800), 16, e, **FAST)[0].sup
     sub = sup_replay_error(walk(free, 200), 16, e, **FAST)[0].sup
     assert sub >= full * 0.5, f"subsampled sup {sub:.2e} far below full-ensemble {full:.2e}"
@@ -267,7 +267,7 @@ def test_it_warns_when_certifying_from_too_few_walkers(free):
     over-provisioned with nothing else to signal it. Silence there would be the worst outcome:
     a confident certificate that is simply too large."""
     with pytest.warns(RuntimeWarning, match="below the ~5,000"):
-        certify(walk(free, 300), env(), eps=2e-2, K_grid=(8, 16, 32, 48), **FAST)
+        certify(walk(free, 300), deliverable(), eps=2e-2, K_grid=(8, 16, 32, 48), **FAST)
 
 
 def test_the_pool_table_is_sized_by_its_worst_row_not_the_mixture(free):
@@ -283,7 +283,7 @@ def test_the_pool_table_is_sized_by_its_worst_row_not_the_mixture(free):
     bw = BandWalk(np.concatenate([fast.C, slow.C, frozen]), T, D0,
                   np.concatenate([np.zeros(400, int), np.ones(400, int), np.full(200, 2)]))
     with pytest.warns(RuntimeWarning):                      # low-N, expected for a fast test
-        pc = certify_pools(bw, env(), names={0: "fast", 1: "slow", 2: "frozen"},
+        pc = certify_pools(bw, deliverable(), names={0: "fast", 1: "slow", 2: "frozen"},
                            eps=2e-2, K_grid=(8, 16, 32, 48), **FAST)
     assert isinstance(pc, PoolCertificate)
     assert set(pc.rows) == {"mixture", "fast", "slow", "frozen"}
@@ -301,7 +301,7 @@ def test_a_pool_too_small_to_certify_is_skipped_not_guessed(free):
     from dmipy_design.certify import certify_pools
     lab = np.concatenate([np.zeros(400, int), np.ones(20, int)])   # 20 is too few
     with pytest.warns(RuntimeWarning):
-        pc = certify_pools(walk(free, 420), env(), labels=lab, eps=2e-2, K_grid=(8, 16, 32, 48),
+        pc = certify_pools(walk(free, 420), deliverable(), labels=lab, eps=2e-2, K_grid=(8, 16, 32, 48),
                            min_walkers=200, **FAST)
     assert "1" not in pc.rows and "0" in pc.rows
 
@@ -309,10 +309,10 @@ def test_a_pool_too_small_to_certify_is_skipped_not_guessed(free):
 def test_pool_labels_come_from_the_walk_or_must_match_it(free_pack, free):
     from dmipy_design.certify import certify_pools
     with pytest.raises(ValueError, match="do not match"):
-        certify_pools(walk(free, 100), env(), labels=np.zeros(7, int), **FAST)
+        certify_pools(walk(free, 100), deliverable(), labels=np.zeros(7, int), **FAST)
     with pytest.raises(ValueError, match="no static pool label"):
-        certify_pools(BandWalk(walk(free, 100).C, T, D0), env(), **FAST)
+        certify_pools(BandWalk(walk(free, 100).C, T, D0), deliverable(), **FAST)
     # a pack's static occupancy column is the default label: one pool here, so one row beside the mixture
     with pytest.warns(RuntimeWarning):
-        pc = certify_pools(free_pack, env(), eps=2e-2, K_grid=(8, 16, 32, 48), **FAST)
+        pc = certify_pools(free_pack, deliverable(), eps=2e-2, K_grid=(8, 16, 32, 48), **FAST)
     assert set(pc.rows) == {"mixture", "0"}
