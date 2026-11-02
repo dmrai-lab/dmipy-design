@@ -11,7 +11,7 @@ import pytest
 
 
 from dmipy_replay.replay.replay import compile_scheme, replay_signal
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 from dmipy_design.replay_design import design_discriminating_waveform, DESIGN_RASTER
 
 from conftest import SLAB_T as T, SLAB_K as K

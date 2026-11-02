@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from dmipy_replay.acquisition.timing import SequenceTiming
-from dmipy_replay.constants import GAMMA
+from dmipy_analytic.constants import GAMMA
 
 __all__ = ["SequenceTiming", "DEFAULT_TIMING", "encoding_mask", "stimulated_echo_mask", "encoding_spectrum"]
 
