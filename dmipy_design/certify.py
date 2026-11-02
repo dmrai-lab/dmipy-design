@@ -52,14 +52,16 @@ import numpy as np
 from dmipy_replay.constants import GAMMA
 from .constraints import waveform_problem
 
-__all__ = ["ReplayEnvelope", "replay_envelope", "BandWalk", "SupResult", "Certificate",
+__all__ = ["DeliverableSet", "deliverable_set", "BandWalk", "SupResult", "Certificate",
            "PoolCertificate", "sup_replay_error", "k_min", "certify",
            "certify_pools"]
 
 
 @dataclass(frozen=True)
-class ReplayEnvelope:
-    """A named scanner class, as the deliverable-waveform set Eq. (4) takes its sup over.
+class DeliverableSet:
+    """The waveforms a named scanner class can deliver -- amplitude and slew included, the moment nulls when asked
+    -- as the set Eq. (4) takes its sup over. It is design's set of waveforms, not the pack's physical
+    :class:`dmipy_replay.Envelope` (the band and amplitude a pack is certified for).
 
     ``raster`` (s) is the grid the adversary's waveforms are sampled on: the class's gradient raster.
     """
@@ -74,7 +76,7 @@ class ReplayEnvelope:
     provenance: dict = field(default_factory=dict)
 
     def problem(self, n_t, dt, *, echo=None, encoding_mask=None):
-        """The shared :class:`~dmipy_design.constraints.WaveformProblem` for this class.
+        """The shared :class:`~dmipy_design.constraints.WaveformProblem` for this set.
 
         ``echo=None`` means the walk is read by an ALREADY-EFFECTIVE waveform (the 180 folded in, as a pack's
         replay reads ``G_eff``), so the sign is +1 throughout and the refocusing constraint reduces to nulling
@@ -92,9 +94,9 @@ class ReplayEnvelope:
                     n_axes=self.n_axes, **self.provenance)
 
 
-def replay_envelope(model=None, *, G_max=None, slew_rate_max=None, raster=10e-6,
+def deliverable_set(model=None, *, G_max=None, slew_rate_max=None, raster=10e-6,
                     null_M1=False, null_M2=False, n_axes=3, regime="diffusion", name=None):
-    """Build a :class:`ReplayEnvelope` from the cited scanner catalogue, or from explicit limits.
+    """Build a :class:`DeliverableSet` from the cited scanner catalogue, or from explicit limits.
 
     ``regime='diffusion'`` takes the PNS-derated diffusion slew where a model publishes one, and
     that is the limit that actually binds a diffusion sequence rather than a detail: Connectom
@@ -102,17 +104,17 @@ def replay_envelope(model=None, *, G_max=None, slew_rate_max=None, raster=10e-6,
     reach at every mode that matters and makes it the EASIEST class to certify, not the hardest.
 
     Preclinical inserts have no cited catalogue entry, so they are given explicitly, e.g.
-    ``replay_envelope(G_max=1.0, slew_rate_max=1e4, name='insert-1T/m')``.
+    ``deliverable_set(G_max=1.0, slew_rate_max=1e4, name='insert-1T/m')``.
     """
     if model is not None:
         from dmipy_replay.acquisition.scanners import ScannerLimits
         lim = ScannerLimits.of(model, regime=regime)
-        return ReplayEnvelope(name or model, lim.G_max, lim.slew_max,
+        return DeliverableSet(name or model, lim.G_max, lim.slew_max,
                               raster if lim.grad_raster is None else lim.grad_raster, null_M1, null_M2, n_axes,
                               dict(source="dmipy_replay.acquisition.scanners", model=lim.name, slew_regime=regime))
     if G_max is None or slew_rate_max is None:
         raise ValueError("give a catalogue `model`, or both `G_max` and `slew_rate_max`")
-    return ReplayEnvelope(name or f"custom-{G_max*1e3:.0f}mT/m", float(G_max),
+    return DeliverableSet(name or f"custom-{G_max*1e3:.0f}mT/m", float(G_max),
                           float(slew_rate_max), float(raster), null_M1, null_M2, n_axes,
                           dict(source="explicit"))
 
@@ -278,7 +280,7 @@ def _moment_basis(prob):
     return Q
 
 
-def _solve(C, K, P, envelope, dt, steps, restarts, rng, warm_start=None, echo=None):
+def _solve(C, K, P, deliverable, dt, steps, restarts, rng, warm_start=None, echo=None):
     """Take the sup by projected Adam ascent, all restarts advanced together.
 
     Not SQP, and not one restart at a time -- both for measured reasons.
@@ -296,7 +298,7 @@ def _solve(C, K, P, envelope, dt, steps, restarts, rng, warm_start=None, echo=No
     ``(K + 2, n_axes)``, so the walk is contracted in band space, never decoded onto the grid.
     """
     n_t = P.shape[1]
-    prob = envelope.problem(n_t, dt, echo=echo)
+    prob = deliverable.problem(n_t, dt, echo=echo)
     starts = ([np.asarray(warm_start, float)] if warm_start is not None else [])
     starts += list(_starts(prob, restarts, rng))
     G0 = np.stack([prob.gradient(x) for x in starts if np.shape(x) == (prob.n_var,)])
@@ -384,24 +386,24 @@ def _free_bound(G, dt, T, K_stored, K, D):
     return float(0.5 * GAMMA ** 2 * ((W ** 2).sum(axis=1) * band_variances(int(K_stored), T, D)[int(K):]).sum())
 
 
-def _grid(walk, envelope, dt):
-    """``(dt, n_t)``: the raster the adversary's waveforms are sampled on (the envelope's unless given) and the
+def _grid(walk, deliverable, dt):
+    """``(dt, n_t)``: the raster the adversary's waveforms are sampled on (the deliverable set's unless given) and the
     sample-and-hold samples that cover the window."""
-    dt = float(envelope.raster if dt is None else dt)
+    dt = float(deliverable.raster if dt is None else dt)
     n_t = int(round(float(walk.T) / dt))
     if n_t < 2:
         raise ValueError(f"the window T = {walk.T:.6g} s holds fewer than two samples at the raster {dt:.3g} s")
     return dt, n_t
 
 
-def sup_replay_error(walk, K, envelope, *, dt=None, steps=300, restarts=64, seed=0,
+def sup_replay_error(walk, K, deliverable, *, dt=None, steps=300, restarts=64, seed=0,
                      warm_start=None, holdout=False, echo=None):
     """The sup of Eq. (4) within the stored band: worst-case ``|S_stored(G) - S_K(G)|`` over ``G_scanner``.
 
     ``walk`` is a :class:`~dmipy_replay.replay.ReplayPack`, a :class:`~dmipy_sim.coefficient_walk.CoefficientWalk`
     or a :class:`BandWalk`; ``K`` is a band below the stored one (the stored band against itself is zero by
     construction, and what lies beyond it is the pack's walk-free term, :class:`Certificate`). The adversary's
-    waveforms are sampled on the envelope's raster (``dt`` overrides it).
+    waveforms are sampled on the deliverable set's raster (``dt`` overrides it).
 
     Returns ``(SupResult, x)`` with ``x`` the winning waveform in the problem's flat layout (a warm start for
     the next band). ``SupResult.sup`` is a **lower bound** on the true sup -- ascent on a non-concave
@@ -420,16 +422,16 @@ def sup_replay_error(walk, K, envelope, *, dt=None, steps=300, restarts=64, seed
         raise ValueError(f"K = {K} is not below the stored band K = {bw.K}: within the stored band the sup is taken "
                          f"of the stored bands against their lowest K, and beyond it the error is the pack's "
                          f"walk-free truncation term")
-    dt, n_t = _grid(bw, envelope, dt)
+    dt, n_t = _grid(bw, deliverable, dt)
     P = _projection(n_t, dt, bw.T, bw.K)
-    best, x, prob = _solve(bw.C, K, P, envelope, dt, steps, restarts, np.random.default_rng(seed), warm_start, echo)
+    best, x, prob = _solve(bw.C, K, P, deliverable, dt, steps, restarts, np.random.default_rng(seed), warm_start, echo)
 
     ho = None
     if holdout:
         h = bw.n_walkers // 2
         if h < 1:
             raise ValueError("holdout needs at least 2 walkers")
-        _, xa, pa = _solve(bw.C[:h], K, P, envelope, dt, steps, restarts,
+        _, xa, pa = _solve(bw.C[:h], K, P, deliverable, dt, steps, restarts,
                            np.random.default_rng(seed + 1), warm_start, echo)
         if xa is not None:
             fb = _objective(pa, bw.C[h:], K, P)
@@ -445,7 +447,7 @@ def sup_replay_error(walk, K, envelope, *, dt=None, steps=300, restarts=64, seed
     return SupResult(float(best), ho, G, bw.n_walkers, b, bound), x
 
 
-def k_min(walk, envelope, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 256),
+def k_min(walk, deliverable, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 256),
           dt=None, steps=300, restarts=64, seed=0, holdout=False, echo=None, verbose=False):
     """Smallest K in ``K_grid`` below the stored band whose measured sup meets ``eps``, with the per-K evidence.
 
@@ -461,7 +463,7 @@ def k_min(walk, envelope, *, eps=5e-3, K_grid=(8, 16, 32, 48, 64, 96, 128, 192, 
     for K in sorted(set(int(k) for k in K_grid)):
         if K >= bw.K:
             continue
-        r, x = sup_replay_error(bw, K, envelope, dt=dt, steps=steps, restarts=restarts, seed=seed,
+        r, x = sup_replay_error(bw, K, deliverable, dt=dt, steps=steps, restarts=restarts, seed=seed,
                                 warm_start=x, holdout=holdout, echo=echo)
         if prev is not None and r.sup > prev * (1 + 1e-6):
             warnings.warn(
@@ -501,7 +503,7 @@ class Certificate:
     K: int                          # bands, on the window this was measured over
     T: float                        # s, that window's duration
     eps: float
-    envelope: dict
+    deliverable: dict               # the description of the deliverable set it was measured over
     K_stored: int                   # bands the walk stores
     truncation: float | None = None   # the pack's walk-free term beyond K_stored (None for an unpacked walk)
     sups: dict = field(default_factory=dict)
@@ -520,12 +522,12 @@ class Certificate:
     def describe(self):
         return dict(certified_bandwidth_hz=self.f_c, K_at_measurement=self.K, T_s=self.T,
                     eps=self.eps, K_stored=self.K_stored, truncation=self.truncation,
-                    n_walkers=self.n_walkers, envelope=self.envelope)
+                    n_walkers=self.n_walkers, deliverable=self.deliverable)
 
 
-def certify(walk, envelope, *, eps=5e-3, K_grid=(4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256),
+def certify(walk, deliverable, *, eps=5e-3, K_grid=(4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256),
             subsample=None, seed=0, **kw):
-    """Certify a walk against ``envelope``: the bandwidth it can be replayed at within ``eps``.
+    """Certify a walk against the deliverable set ``deliverable``: the bandwidth it can be replayed at within ``eps``.
 
     The bands of ``K_grid`` below the stored one are measured (:func:`k_min`); when none meets ``eps`` the
     stored band itself is the certificate, which holds when the pack's walk-free truncation term beyond it is
@@ -552,21 +554,21 @@ def certify(walk, envelope, *, eps=5e-3, K_grid=(4, 8, 16, 24, 32, 48, 64, 96, 1
             f"and K will be over-provisioned with nothing else to signal it. A pack built to a "
             f"5e-3 Monte-Carlo floor carries ~116,000 walkers and clears this comfortably; "
             f"diagnostic walks do not.", RuntimeWarning, stacklevel=2)
-    K, sups = k_min(bw, envelope, eps=eps, K_grid=K_grid, seed=seed, **kw)
+    K, sups = k_min(bw, deliverable, eps=eps, K_grid=K_grid, seed=seed, **kw)
     if K is None:
         tried = f"no K in {tuple(k for k in sorted(K_grid) if k < bw.K)} below the stored band certifies "
         if bw.truncation is None:
             raise ValueError(
-                f"{tried}{envelope.name} at eps={eps:g} on this walk, and the walk states no truncation term beyond "
+                f"{tried}{deliverable.name} at eps={eps:g} on this walk, and the walk states no truncation term beyond "
                 f"its stored band K = {bw.K} (it is not a pack): build the pack, whose certificate bounds that band, "
                 f"or extend K_grid below it")
         if bw.truncation > eps:
             raise ValueError(
-                f"{tried}{envelope.name} at eps={eps:g} on this walk, and the pack's own band K = {bw.K} does not "
+                f"{tried}{deliverable.name} at eps={eps:g} on this walk, and the pack's own band K = {bw.K} does not "
                 f"either: its walk-free truncation term is {bw.truncation:.3e} > eps. Loosen eps, or walk the "
                 f"substrate at a wider band.")
         K = bw.K
-    return Certificate(f_c=K / (2.0 * T), K=int(K), T=T, eps=float(eps), envelope=envelope.describe(),
+    return Certificate(f_c=K / (2.0 * T), K=int(K), T=T, eps=float(eps), deliverable=deliverable.describe(),
                        K_stored=int(bw.K), truncation=bw.truncation, sups=sups, n_walkers=int(bw.n_walkers))
 
 
@@ -632,7 +634,7 @@ class PoolCertificate:
                     rows={k: v.describe() for k, v in self.rows.items()})
 
 
-def certify_pools(walk, envelope, *, labels=None, names=None, eps=5e-3, min_walkers=200, **kw):
+def certify_pools(walk, deliverable, *, labels=None, names=None, eps=5e-3, min_walkers=200, **kw):
     """Certify the mixture AND each selectable pool, returning the table a pack should carry.
 
     ``labels`` is the per-walker compartment id, by default the walk's own static pool label (a pack's
@@ -650,7 +652,7 @@ def certify_pools(walk, envelope, *, labels=None, names=None, eps=5e-3, min_walk
     if len(labels) != bw.n_walkers:
         raise ValueError(f"labels {labels.shape} do not match {bw.n_walkers} walkers")
     names = names or {}
-    rows = {"mixture": certify(bw, envelope, eps=eps, **kw)}
+    rows = {"mixture": certify(bw, deliverable, eps=eps, **kw)}
     for lab in np.unique(labels):
         m = labels == lab
         if int(m.sum()) < min_walkers:
@@ -661,7 +663,12 @@ def certify_pools(walk, envelope, *, labels=None, names=None, eps=5e-3, min_walk
             continue
         nm = names.get(int(lab), str(int(lab)))
         try:
-            rows[nm] = certify(bw.take(m), envelope, eps=eps, **kw)
+            rows[nm] = certify(bw.take(m), deliverable, eps=eps, **kw)
         except ValueError as e:
             raise ValueError(f"pool {nm!r}: {e}") from None
     return PoolCertificate(rows=rows, n_walkers=int(bw.n_walkers))
+
+
+def __getattr__(name):
+    from ._moved import refuse
+    raise refuse(__name__, name)
