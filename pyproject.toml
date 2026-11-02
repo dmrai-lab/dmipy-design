@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dmipy-design"
-version = "2.0.1"
-description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE) over dmipy-sim's acquisition object and scanner limits, Pulseq I/O — instant-pulse public scope"
+version = "3.0.0"
+description = "Hardware-constrained diffusion-MRI gradient-waveform design (NOW: LTE/PTE/STE/OGSE/PGSTE) over dmipy-replay's acquisition object and scanner limits, Pulseq I/O — instant-pulse public scope"
 readme = "README.md"
 license = { text = "AGPL-3.0-only OR LicenseRef-Commercial" }  # dual-licensed; see LICENSING.md
 authors = [
@@ -13,7 +13,7 @@ authors = [
 ]
 keywords = ["diffusion MRI", "gradient waveform design", "b-tensor encoding", "Pulseq", "optimization"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: GNU Affero General Public License v3",
     "Operating System :: OS Independent",
@@ -22,8 +22,8 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.24",
-    "scipy>=1.10",
+    "numpy>=2.0",
+    "scipy>=1.11",
     # the acquisition object a design produces, the timing budget it is built to and the cited scanner
     # limits it is built under live in dmipy-replay; this package is the optimisation over them
     "dmipy-replay>=0.2,<0.3",
